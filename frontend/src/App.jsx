@@ -8,7 +8,6 @@ import SupportedClaimsSection from './components/SupportedClaimsSection';
 import LogicalInconsistenciesSection from './components/LogicalInconsistenciesSection';
 import SafetyRecommendationsSection from './components/SafetyRecommendationsSection';
 import AuditLoadingOverlay from './components/AuditLoadingOverlay';
-import DeveloperDiagnostics from './components/DeveloperDiagnostics';
 import { exportAuditPdf } from './utils/pdfGenerator';
 import { runAudit, getSampleData, getConfig } from './services/api';
 
@@ -30,7 +29,6 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState('');
   const [activeFilter, setActiveFilter] = useState('ALL');
   const [selectedClaimId, setSelectedClaimId] = useState(null);
-  const [devMode, setDevMode] = useState(false);
 
   // Fetch backend configuration on mount
   useEffect(() => {
@@ -278,8 +276,6 @@ export default function App() {
         serverConfig={serverConfig}
         apiKey={apiKey}
         setApiKey={setApiKey}
-        devMode={devMode}
-        setDevMode={setDevMode}
         onConfigUpdated={(cfg) => setServerConfig(cfg)}
       />
 
@@ -349,10 +345,6 @@ export default function App() {
             />
           )}
 
-          {/* Developer Diagnostics (when Dev Mode is ON) */}
-          {devMode && (
-            <DeveloperDiagnostics auditResult={auditResult} />
-          )}
 
           {/* 2. Prioritized Issues That Need Attention (Contradicted & Unverified first) */}
           {(activeFilter === 'ALL' || activeFilter === 'ISSUES' || activeFilter === 'CONTRADICTED' || activeFilter === 'INSUFFICIENT_EVIDENCE' || activeFilter === 'AMBIGUOUS') && (
