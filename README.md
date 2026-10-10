@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Second Opinion — Explainable AI Answer Auditor
 
 > Built for **BIT N BUILD CRCE Hackathon**.
@@ -81,6 +80,3 @@ Second Opinion/
 ├── frontend/                      # React + Vite Glassmorphism UI
 └── start.bat                      # One-click Windows runner
 ```
-=======
-# Webheads_college_round
->>>>>>> 4b7c6c4511b00e53a0abd5ccc59a8712cd9f3826

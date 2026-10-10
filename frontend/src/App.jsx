@@ -54,7 +54,16 @@ export default function App() {
       const result = await runAudit(payload);
       setAuditResult(result);
     } catch (err) {
-      setErrorMsg(err.response?.data?.detail || 'Audit execution failed. Ensure backend server is running on port 8000.');
+      const detail = err.response?.data?.detail;
+      let msg = 'Audit execution failed. Ensure backend server is running on port 8000.';
+      if (typeof detail === 'string') {
+        msg = detail;
+      } else if (Array.isArray(detail)) {
+        msg = detail.map((d) => d.msg || JSON.stringify(d)).join('; ');
+      } else if (err.message) {
+        msg = err.message;
+      }
+      setErrorMsg(msg);
     } finally {
       setIsLoading(false);
     }

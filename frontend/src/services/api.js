@@ -7,7 +7,7 @@ const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 45000,
+  timeout: 120000,
 });
 
 export const runAudit = async (payload) => {
