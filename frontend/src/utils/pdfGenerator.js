@@ -112,7 +112,7 @@ export function exportAuditPdf(auditResult, documents = []) {
   // --- 3. Issues Requiring Attention (Contradicted & Unverified claims) ---
   const allClaims = auditResult.claims || [];
   const rawIssues = allClaims.filter(
-    (c) => c.verdict === 'CONTRADICTED' || c.verdict === 'INSUFFICIENT_EVIDENCE' || c.flags?.internal_contradiction
+    (c) => c.verdict === 'CONTRADICTED' || c.verdict === 'INSUFFICIENT_EVIDENCE' || c.verdict === 'AMBIGUOUS' || c.flags?.internal_contradiction
   );
 
   // Sort Contradicted first, then Unverified

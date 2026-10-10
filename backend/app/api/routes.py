@@ -93,9 +93,11 @@ def check_model_availability(api_key: Optional[str] = None, body: Optional[Model
     try:
         from google import genai
         from google.genai import types
+        from app.config import call_gemini_with_retry
         client = genai.Client(api_key=effective_key)
-        resp = client.models.generate_content(
-            model=settings.DEFAULT_MODEL,
+        resp = call_gemini_with_retry(
+            client=client,
+            model_name=settings.DEFAULT_MODEL,
             contents="ping",
             config=types.GenerateContentConfig(max_output_tokens=5)
         )

@@ -1,5 +1,5 @@
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class ClaimExtractor:
     """
@@ -140,8 +140,11 @@ Return ONLY valid JSON matching:
   ]
 }}"""
 
-        response = client.models.generate_content(
-            model=resolved_model,
+        from app.config import call_gemini_with_retry
+
+        response = call_gemini_with_retry(
+            client=client,
+            model_name=resolved_model,
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.0,

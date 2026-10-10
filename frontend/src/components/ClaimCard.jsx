@@ -13,6 +13,7 @@ export default function ClaimCard({
   if (
     claim.verdict === 'CONTRADICTED' ||
     claim.verdict === 'INSUFFICIENT_EVIDENCE' ||
+    claim.verdict === 'AMBIGUOUS' ||
     claim.verdict === 'LOGICAL_INCONSISTENCY' ||
     claim.flags?.internal_contradiction
   ) {

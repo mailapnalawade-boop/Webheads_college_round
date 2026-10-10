@@ -7,6 +7,26 @@ class VerdictEnum(str, Enum):
     CONTRADICTED = "CONTRADICTED"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
     LOGICAL_INCONSISTENCY = "LOGICAL_INCONSISTENCY"
+    AMBIGUOUS = "AMBIGUOUS"  # evidence is partial/conflicting: NOT counted as an error
+
+
+class ErrorCategory(str, Enum):
+    NUMERIC_MISMATCH = "NUMERIC_MISMATCH"
+    ENTITY_MISMATCH = "ENTITY_MISMATCH"
+    CONTRADICTS_SOURCE = "CONTRADICTS_SOURCE"
+    UNSUPPORTED_CLAIM = "UNSUPPORTED_CLAIM"
+    LOGICAL_FLAW = "LOGICAL_FLAW"
+    INTERNAL_CONTRADICTION = "INTERNAL_CONTRADICTION"
+    UNSAFE_RECOMMENDATION = "UNSAFE_RECOMMENDATION"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class ErrorSpan(BaseModel):
+    """Exact characters of the ORIGINAL ANSWER that contain the error (answer[start:end] == text)."""
+    start_char: int
+    end_char: int
+    text: str
+    precision: str = "exact"  # "exact" (verified value mismatch) or "approximate" (words absent from the source)
 
 class DocumentInput(BaseModel):
     filename: str
@@ -25,7 +45,7 @@ class EvidenceItem(BaseModel):
     source_name: str
     page_number: Optional[int] = 1
     relevance_score: float
-    match_type: str = "bm25_passage"  # "bm25_passage" or "web_search"
+    match_type: str = "bm25_passage"  # "bm25_passage", "semantic_passage" or "web_search"
     is_contradictory: bool = False
     is_external: bool = False
 
@@ -49,6 +69,9 @@ class ClaimItem(BaseModel):
     source_references: List[str] = []
     inconsistency_details: Optional[str] = None
     safety_details: Optional[str] = None
+    error_category: Optional[ErrorCategory] = None
+    error_span: Optional[ErrorSpan] = None
+    confidence_signals: Dict[str, Any] = Field(default_factory=dict)  # why the confidence is what it is
     flags: ClaimFlags = Field(default_factory=ClaimFlags)
 
 class UnsafeRecommendation(BaseModel):
@@ -80,6 +103,7 @@ class SummaryMetrics(BaseModel):
     supported_count: int
     contradicted_count: int
     insufficient_evidence_count: int
+    ambiguous_count: int = 0
     logical_inconsistency_count: int = 0
     unsafe_recommendations_count: int = 0
     credibility_score: float = Field(..., ge=0.0, le=100.0)
@@ -106,3 +130,4 @@ class AuditResponse(BaseModel):
     logical_inconsistencies: List[LogicalInconsistencyItem] = []
     safety_analysis: SafetyAnalysisResult = Field(default_factory=SafetyAnalysisResult)
     original_answer: str
+    warnings: List[str] = Field(default_factory=list)  # e.g. semantic model unavailable -> reduced accuracy

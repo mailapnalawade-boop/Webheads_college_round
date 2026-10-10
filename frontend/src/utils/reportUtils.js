@@ -27,6 +27,16 @@ export function getIssueClassification(claim) {
         border: 'var(--status-contradicted-border)',
         description: 'Directly conflicts with verified facts in reference documents.'
       };
+    case 'AMBIGUOUS':
+      return {
+        type: 'AMBIGUOUS',
+        label: 'Ambiguous',
+        badgeText: 'AMBIGUOUS',
+        color: '#60a5fa',
+        bg: 'var(--status-insufficient-bg)',
+        border: 'var(--status-insufficient-border)',
+        description: 'Evidence is partial or conflicting. This is not counted as an error.'
+      };
     case 'INSUFFICIENT_EVIDENCE':
       return {
         type: 'UNVERIFIED',

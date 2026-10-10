@@ -339,6 +339,7 @@ export default function AuditOverview({
           { key: 'ISSUES', label: `Issues Requiring Attention (${issuesCount})`, highlight: issuesCount > 0 },
           { key: 'CONTRADICTED', label: `Contradicted (${summary.contradicted_count})` },
           { key: 'INSUFFICIENT_EVIDENCE', label: `Unverified (${summary.insufficient_evidence_count})` },
+          { key: 'AMBIGUOUS', label: `Ambiguous (${summary.ambiguous_count ?? 0})` },
           { key: 'SUPPORTED', label: `Supported (${summary.supported_count})` }
         ].map((tab) => {
           const isActive = activeFilter === tab.key;

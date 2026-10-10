@@ -188,8 +188,11 @@ IMPORTANT:
   "summary": "1 sentence overview"
 }}"""
 
-            response = client.models.generate_content(
-                model=resolved_model,
+            from app.config import call_gemini_with_retry
+
+            response = call_gemini_with_retry(
+                client=client,
+                model_name=resolved_model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.0,

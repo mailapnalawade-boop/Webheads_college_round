@@ -1,6 +1,9 @@
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from rank_bm25 import BM25Okapi
+
+from app.config import settings
+from app.core.text_utils import STOP_WORDS as _SHARED_STOP_WORDS
 
 class PassageRetriever:
     """
@@ -8,17 +11,12 @@ class PassageRetriever:
     Retrieves evidence passages with true semantic relevance and prevents artificial score inflation.
     """
 
-    STOP_WORDS = {
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with",
-        "by", "about", "against", "between", "into", "through", "during", "before",
-        "after", "above", "below", "from", "up", "down", "of", "off", "over", "under",
-        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
-        "do", "does", "did", "should", "would", "could", "ought", "this", "that",
-        "these", "those", "can", "will", "may", "must", "it", "its", "they", "them"
-    }
+    STOP_WORDS = _SHARED_STOP_WORDS
 
-    def __init__(self, passages: List[Dict[str, Any]]):
+    def __init__(self, passages: List[Dict[str, Any]], embedder: Optional[Any] = None):
         self.passages = passages
+        self.embedder = embedder
+        self._vectors = embedder.encode([p["text"] for p in passages]) if embedder and passages else []
         self.corpus = [self._tokenize(p["text"]) for p in passages]
         self.bm25 = BM25Okapi(self.corpus) if self.corpus and any(self.corpus) else None
 
@@ -44,6 +42,7 @@ class PassageRetriever:
         max_bm25 = max(clamped_bm25) if clamped_bm25 else 0.0
 
         results = []
+        semantic = self._semantic_scores(claim_text)
 
         for idx, passage in enumerate(self.passages):
             passage_tokens = self.corpus[idx]
@@ -66,24 +65,24 @@ class PassageRetriever:
             else:
                 bm25_score = 0.0
 
-            # If no meaningful words overlap, relevance must be 0.0
-            if not shared_tokens:
-                combined_score = 0.0
-            else:
-                combined_score = 0.6 * overlap_ratio + 0.4 * bm25_score
+            sim = semantic[idx]
+            lexical = 0.0
+            if shared_tokens:
+                lexical = 0.6 * overlap_ratio + 0.4 * bm25_score
                 if has_num_match:
-                    combined_score = min(1.0, combined_score + 0.15)
+                    lexical = min(1.0, lexical + 0.15)
 
-            combined_score = round(combined_score, 4)
-
-            # Strict relevance threshold: require combined_score >= 0.15 or at least 2 shared content tokens
-            if (combined_score >= 0.15 or len(shared_tokens) >= 2) and len(shared_tokens) >= 1:
+            # Hybrid: lexical evidence blended with meaning-based similarity (finds paraphrases)
+            combined_score = round(0.55 * lexical + 0.45 * sim if self.embedder else lexical, 4)
+            lexical_ok = (combined_score >= 0.15 or len(shared_tokens) >= 2) and len(shared_tokens) >= 1
+            semantic_ok = bool(self.embedder) and sim >= settings.SEMANTIC_MIN_SIMILARITY
+            if lexical_ok or semantic_ok:
                 results.append({
                     "excerpt": passage["text"],
                     "source_name": passage["source_name"],
                     "page_number": passage.get("page_number", 1),
-                    "relevance_score": combined_score,
-                    "match_type": "bm25_passage"
+                    "relevance_score": max(combined_score, round(sim * 0.8, 4)) if semantic_ok and not lexical_ok else combined_score,
+                    "match_type": "bm25_passage" if lexical_ok else "semantic_passage",
                 })
 
         # Sort by relevance descending with deterministic tie-breaker
@@ -98,6 +97,12 @@ class PassageRetriever:
                 deduped_results.append(res)
 
         return deduped_results[:top_k]
+
+    def _semantic_scores(self, claim_text: str) -> List[float]:
+        if not self.embedder or not self._vectors:
+            return [0.0] * len(self.passages)
+        q = self.embedder.encode([claim_text])[0]
+        return [max(0.0, sum(a * b for a, b in zip(q, v))) for v in self._vectors]
 
     @staticmethod
     def search_web(query: str, max_results: int = 3) -> List[Dict[str, Any]]:

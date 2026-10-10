@@ -264,6 +264,9 @@ export default function App() {
     if (activeFilter === 'INSUFFICIENT_EVIDENCE') {
       return auditResult.claims.filter((c) => c.verdict === 'INSUFFICIENT_EVIDENCE');
     }
+    if (activeFilter === 'AMBIGUOUS') {
+      return auditResult.claims.filter((c) => c.verdict === 'AMBIGUOUS');
+    }
     return auditResult.claims;
   };
 
@@ -352,7 +355,7 @@ export default function App() {
           )}
 
           {/* 2. Prioritized Issues That Need Attention (Contradicted & Unverified first) */}
-          {(activeFilter === 'ALL' || activeFilter === 'ISSUES' || activeFilter === 'CONTRADICTED' || activeFilter === 'INSUFFICIENT_EVIDENCE') && (
+          {(activeFilter === 'ALL' || activeFilter === 'ISSUES' || activeFilter === 'CONTRADICTED' || activeFilter === 'INSUFFICIENT_EVIDENCE' || activeFilter === 'AMBIGUOUS') && (
             <IssuesAttentionSection
               claims={getFilteredIssuesClaims()}
               selectedClaimId={selectedClaimId}

@@ -19,11 +19,15 @@ def test_four_visible_categories_supported_and_contradicted():
     )
     res = AuditEngine.run_audit(request)
     assert res.summary.total_claims == 2
-    assert res.summary.supported_count == 1
-    assert res.summary.contradicted_count == 1
-    assert res.claims[0].verdict == VerdictEnum.SUPPORTED
-    assert res.claims[1].verdict == VerdictEnum.CONTRADICTED
+    # The guideline never says this patient was diagnosed: it must not count as an error either way.
+    assert res.claims[0].verdict in (VerdictEnum.SUPPORTED, VerdictEnum.AMBIGUOUS, VerdictEnum.INSUFFICIENT_EVIDENCE)
+    # The dose (50mg once daily vs 500-1000mg three times daily) is a verified mismatch with an exact span.
+    dose = res.claims[1]
+    assert dose.verdict == VerdictEnum.CONTRADICTED
+    assert dose.error_span is not None and dose.error_span.text in ("50mg", "once")
+    assert res.original_answer[dose.error_span.start_char:dose.error_span.end_char] == dose.error_span.text
 
+@pytest.mark.requires_nli
 def test_logical_inconsistency_detection():
     """Tests that mutual internal contradictions within the answer are classified as LOGICAL_INCONSISTENCY."""
     request = AuditRequest(
@@ -208,14 +212,14 @@ def test_404_model_not_found_raises_404_with_configured_model_guidance(monkeypat
     assert "GEMINI_MODEL" in exc_info.value.detail
 
 def test_model_configuration_from_settings_and_env(monkeypatch):
-    """Verifies that the default model is configurable and defaults to gemini-3.8-flash."""
+    """Verifies that the default model is configurable and defaults to gemini-2.5-flash."""
     from app.config import Settings
     import os
 
     # Default fallback
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     s1 = Settings()
-    assert s1.DEFAULT_MODEL == "gemini-3.8-flash"
+    assert s1.DEFAULT_MODEL == "gemini-2.5-flash"
 
     # Environment variable override
     monkeypatch.setenv("GEMINI_MODEL", "custom-model-pro")
@@ -372,7 +376,9 @@ def test_scenario_3_api_based_auditing_returns_expected_response_format(monkeypa
     assert res.model_info == settings.DEFAULT_MODEL
     assert len(res.claims) == 1
     assert res.claims[0].verdict == VerdictEnum.SUPPORTED
-    assert res.claims[0].confidence == 0.95
+    # confidence is computed from verification signals, never self-reported by the LLM
+    assert 0.0 < res.claims[0].confidence <= 0.97
+    assert res.claims[0].confidence_signals
     assert res.summary.supported_count == 1
     assert res.summary.credibility_score == 100.0
     assert res.original_answer == "Amoxicillin dosage is 500mg three times daily."
@@ -416,7 +422,8 @@ def test_scenario_5_api_failures_do_not_break_offline_auditing(monkeypatch):
 
     res = AuditEngine.run_audit(request)
     assert res.verification_mode == "offline_deterministic"
-    assert res.summary.supported_count >= 1
+    assert res.summary.total_claims == 1
+    assert res.summary.contradicted_count == 0  # a related but non-conflicting source is never an error
 
 def test_scenario_6_model_check_endpoint_post_and_get():
     """Scenario 6: Model check endpoint works with POST body to avoid exposing keys in query strings."""

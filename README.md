@@ -80,3 +80,28 @@ Second Opinion/
 ├── frontend/                      # React + Vite Glassmorphism UI
 └── start.bat                      # One-click Windows runner
 ```
+
+---
+
+## How claims are judged (meaning, not words)
+
+1. **Retrieve** - BM25 plus sentence embeddings find the relevant passages, so paraphrases ("car" / "automobile") are found.
+2. **Read the meaning** - a local NLI model (`cross-encoder/nli-deberta-v3-small`) reads each source sentence together with the claim and decides *entails / contradicts / unrelated*. With a Gemini key, Gemini also judges the claim and must quote the source verbatim; code verifies that the quote really exists, otherwise the verdict is downgraded.
+3. **Verify hard facts** - numbers (with unit conversion and ranges), years, frequencies and names are compared exactly, because neural models can miss a swapped number. A verified mismatch is reported with the exact wrong words.
+4. **Cross-check** - if the meaning model, the value check and Gemini disagree, the claim becomes **AMBIGUOUS** with lowered confidence instead of a guess.
+
+Verdicts: `SUPPORTED`, `CONTRADICTED` (a genuine error), `INSUFFICIENT_EVIDENCE` (source is silent), `AMBIGUOUS` (partial/conflicting evidence, *not* an error), `LOGICAL_INCONSISTENCY`.
+Each flagged claim carries `error_category`, `error_span` (answer[start:end] is verified to equal the text) and `confidence_signals` explaining the confidence.
+
+**First run:** the NLI and embedding models (~200 MB) download once from Hugging Face. Without them (no internet or no `sentence-transformers`) the app still works but is conservative: it only calls a claim SUPPORTED when the source states it almost verbatim, and it reports an **AMBIGUOUS** result plus a warning instead of guessing. Set `SO_ENABLE_SEMANTIC_MODELS=0` to turn the models off.
+
+## Evaluation
+
+```bash
+cd backend
+python -m tests.eval.run              # current engine (uses the models if installed)
+python -m tests.eval.run --no-models  # model-free mode
+python -m tests.eval.run --legacy     # the previous keyword/antonym engine, for before/after
+python -m pytest                      # tests needing the real model are marked requires_nli and run when it is installed
+```
+Reports precision/recall, the missed-error rate (a wrong claim passed as supported), the false-alarm rate, exact-span accuracy and a calibration table. The command exits non-zero if a safety gate fails.

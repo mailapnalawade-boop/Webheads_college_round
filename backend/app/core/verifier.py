@@ -1,660 +1,315 @@
-import json
-import uuid
+"""Audit orchestration. Each stage lives in its own module; this file only wires them together.
+
+Pipeline: extract claims -> retrieve evidence (BM25 + embeddings) -> judge meaning (NLI + entity checks,
+cross-checked by Gemini when enabled) -> internal consistency -> safety -> report.
+"""
 import hashlib
 import logging
+import os
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Tuple, Optional
-from fastapi import HTTPException, status
-from google import genai
-from google.genai import types
+from typing import Any, Dict, List, Optional, Tuple
+
+from fastapi import HTTPException
 
 from app.config import settings
-from app.schemas.audit import (
-    AuditRequest, AuditResponse, ClaimItem, EvidenceItem,
-    SummaryMetrics, VerdictEnum, ClaimFlags,
-    LogicalInconsistencyItem, SafetyAnalysisResult
-)
+from app.core import consistency
+from app.core.cache import LRUCache
 from app.core.extractor import ClaimExtractor
+from app.core.judge import ClaimSpan, Judgement, SemanticJudge
+from app.core.llm_errors import classify_llm_error
+from app.core.llm_verifier import GeminiVerifier, LLMVerdict, coerce_llm_result, merge_with_local
+from app.core.model_registry import registry
 from app.core.parser import DocumentParser
 from app.core.retriever import PassageRetriever
-from app.core.fallback import DeterministicVerifier
 from app.core.safety import SafetyAnalyzer
+from app.schemas.audit import (AuditRequest, AuditResponse, ClaimFlags, ClaimItem, ErrorCategory, ErrorSpan,
+                               EvidenceItem, LogicalInconsistencyItem, SafetyAnalysisResult, SummaryMetrics,
+                               VerdictEnum)
 
 logger = logging.getLogger("second_opinion.verifier")
 
-PROMPT_VERSION = "2026.04.1"
-_AUDIT_CACHE: Dict[str, AuditResponse] = {}
-_MAX_CACHE_SIZE = 128
+PROMPT_VERSION = "2026.10.1"
+NO_NLI_WARNING = ("Semantic (NLI) model not loaded: offline verdicts are limited to verified value mismatches, "
+                  "polarity flips and near-verbatim matches; everything else is reported as Ambiguous rather than guessed. "
+                  "Install sentence-transformers and allow the one-time model download for meaning-based checking.")
+
+
+@dataclass
+class RunMode:
+    use_llm: bool
+    explicit_llm: bool
+    api_key: str
+    model_name: str
+
+    @property
+    def active_mode(self) -> str:
+        return "llm_api" if self.use_llm else "offline_deterministic"
+
 
 class AuditEngine:
-    """
-    Verification Orchestrator for Second Opinion.
-    Integrates Atomic Claim Extraction, Ground-Truth Evidence Retrieval,
-    Low-Temperature LLM / Deterministic Verification, Logical Inconsistency Analysis,
-    and Potentially Unsafe Recommendation Analysis.
-    """
+    cache: LRUCache = LRUCache(settings.AUDIT_CACHE_SIZE)
 
+    # ---------------------------------------------------------- error helpers
     @staticmethod
     def _classify_llm_error(err: Exception, model_name: str, stage: str) -> Tuple[int, str]:
-        """
-        Classifies upstream LLM errors into actionable diagnostics and appropriate HTTP status codes.
-        - Invalid/rejected API key -> HTTP 401 Unauthorized with clear actionable guidance.
-        - Model 404/NOT_FOUND -> HTTP 404 Not Found with GEMINI_MODEL configuration guidance.
-        - Rate limit / Quota exceeded -> HTTP 502 Bad Gateway with ResourceExhausted detail.
-        - General API/Network failure -> HTTP 502 Bad Gateway.
-        """
-        err_str = str(err)
-        err_lower = err_str.lower()
-
-        # 1. Invalid or Rejected API Key
-        is_invalid_key = any(pattern in err_str for pattern in [
-            "API_KEY_INVALID", "API key not valid", "API_KEY_SERVICE_BLOCKED",
-            "IP_NOT_PERMITTED"
-        ]) or (
-            ("api key" in err_lower or "api_key" in err_lower) and
-            any(w in err_lower for w in ["invalid", "rejected", "not valid", "unauthorized", "expired", "missing"])
-        ) or "PERMISSION_DENIED" in err_str or "UNAUTHENTICATED" in err_str
-
-        if is_invalid_key:
-            return (
-                status.HTTP_401_UNAUTHORIZED,
-                f"The provided Gemini API key is invalid or has been rejected by Google AI (API_KEY_INVALID). "
-                f"Please verify your API key in Configure Key or set a valid GEMINI_API_KEY in your environment, "
-                f"or switch to Offline Deterministic Mode in Advanced Settings."
-            )
-
-        # 2. Model 404 / NOT_FOUND
-        if "404" in err_str or "NOT_FOUND" in err_str or "not found" in err_lower:
-            return (
-                status.HTTP_404_NOT_FOUND,
-                f"Configured Gemini model '{model_name}' was not found or is no longer available during {stage} "
-                f"(404 NOT_FOUND: {err_str}). Please verify model availability for your API key and update the "
-                f"GEMINI_MODEL environment variable (e.g., 'gemini-3.8-flash' or another currently supported model), "
-                f"or switch to Offline Deterministic Mode in Advanced Settings."
-            )
-
-        # 3. Rate Limit / Resource Exhausted
-        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "ResourceExhausted" in err_str or "quota" in err_lower:
-            return (
-                status.HTTP_502_BAD_GATEWAY,
-                f"Gemini API {stage} failed with model '{model_name}': Google GenAI RateLimit (429 ResourceExhausted). "
-                f"You can retry the audit, check your API key/network, or switch to Offline Deterministic Mode in Advanced Settings."
-            )
-
-        # 4. General Upstream Provider Failure
-        return (
-            status.HTTP_502_BAD_GATEWAY,
-            f"Gemini API {stage} failed with model '{model_name}': {err_str}. "
-            f"You can retry the audit, check your API key/network, or switch to Offline Deterministic Mode in Advanced Settings."
-        )
+        return classify_llm_error(err, model_name, stage)
 
     @staticmethod
     def _format_llm_error(err: Exception, model_name: str, stage: str) -> str:
-        """Formats upstream LLM errors with clear diagnostics and availability guidance (backward compatible)."""
-        _, detail = AuditEngine._classify_llm_error(err, model_name, stage)
-        return detail
+        return classify_llm_error(err, model_name, stage)[1]
 
     @staticmethod
-    def _compute_cache_key(request: AuditRequest, mode: str, model_name: str) -> str:
-        """Generates a deterministic hash for identical input and model configurations."""
-        norm_answer = " ".join(request.answer_text.strip().split())
-        doc_signature = "|".join(
-            f"{d.filename}:{hashlib.sha256((d.content or '').encode('utf-8')).hexdigest()[:12]}:{d.content_type}"
-            for d in sorted(request.documents, key=lambda x: x.filename or "")
-        )
-        options_sig = f"{mode}:{model_name}:{request.options.enable_web_search}:{request.options.top_k_passages}:{request.options.similarity_threshold}:{PROMPT_VERSION}"
-        raw = f"{norm_answer}###{doc_signature}###{options_sig}"
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    def _raise_llm_error(err: Exception, mode: RunMode, stage: str) -> None:
+        status_code, detail = classify_llm_error(err, mode.model_name, stage)
+        raise HTTPException(status_code=status_code, detail=detail)
 
+    # ------------------------------------------------------------------ main
     @staticmethod
     def run_audit(request: AuditRequest) -> AuditResponse:
         audit_id = f"audit_{uuid.uuid4().hex[:8]}"
-        logger.info(f"Starting audit {audit_id} with {len(request.documents)} documents.")
+        mode = AuditEngine._resolve_mode(request)
+        cache_key = AuditEngine._compute_cache_key(request, mode.active_mode, mode.model_name)
+        cached = AuditEngine.cache.get(cache_key)
+        if cached is not None:
+            return AuditEngine._as_cached(cached, audit_id)
 
-        # 1. Resolve Verification Mode
-        force_offline = (
-            request.options.force_deterministic_fallback or
-            request.options.verification_mode == "offline"
-        )
-        import os
-        api_key = (
-            request.api_key or
-            settings.GEMINI_API_KEY or
-            os.getenv("GEMINI_API_KEY") or
-            os.getenv("GOOGLE_API_KEY") or
-            ""
-        ).strip().strip('"').strip("'")
-        explicit_llm_mode = request.options.verification_mode == "llm"
+        claims = AuditEngine._extract_claims(request, mode)
+        passages = DocumentParser.parse_documents(request.documents)
+        retriever = PassageRetriever(passages, embedder=registry.embedder)
+        judge = SemanticJudge(registry.nli, registry.embedder)
+        inconsistencies = AuditEngine._detect_logical_inconsistencies(claims, mode.use_llm, mode.api_key, mode.model_name)
+        conflicted = {cid for li in inconsistencies for cid in (li.claim_id_1, li.claim_id_2) if cid}
 
-        if explicit_llm_mode and not api_key:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="GEMINI_API_KEY is not configured on the backend environment. Please set GEMINI_API_KEY in the server environment or switch to Offline Deterministic Mode in Advanced Settings."
-            )
-
-        use_llm = not force_offline and bool(api_key)
-        active_mode = "llm_api" if use_llm else "offline_deterministic"
-        model_name = settings.DEFAULT_MODEL if use_llm else "Deterministic Rule & BM25 Engine"
-
-        # 2. Check Cache for Identical Normalized Inputs
-        cache_key = AuditEngine._compute_cache_key(request, active_mode, model_name)
-        if cache_key in _AUDIT_CACHE:
-            cached_resp = _AUDIT_CACHE[cache_key].model_copy(deep=True)
-            cached_resp.audit_id = audit_id
-            cached_resp.timestamp = datetime.now(timezone.utc).isoformat()
-            cached_resp.cached = True
-            logger.info(f"Returning cached audit report for key {cache_key[:12]}")
-            return cached_resp
-
-        # 3. Extract Atomic Claims
-        if use_llm:
-            try:
-                extracted_claims = ClaimExtractor.extract_claims_with_llm(
-                    request.answer_text, api_key=api_key, model_name=model_name
-                )
-            except Exception as e:
-                logger.error(f"LLM claim extraction failed: {type(e).__name__}")
-                status_code, err_detail = AuditEngine._classify_llm_error(e, model_name, "claim extraction")
-                raise HTTPException(status_code=status_code, detail=err_detail)
-        else:
-            extracted_claims = ClaimExtractor.extract_claims(request.answer_text)
-
-        logger.info(f"Extracted {len(extracted_claims)} atomic claims.")
-
-        # 4. Ingest Reference Documents into Passages
-        parsed_passages = DocumentParser.parse_documents(request.documents)
-        retriever = PassageRetriever(parsed_passages)
-
-        # 5. Detect Logical Inconsistencies between Extracted Claims
-        logical_inconsistencies = AuditEngine._detect_logical_inconsistencies(
-            extracted_claims=extracted_claims,
-            use_llm=use_llm,
-            api_key=api_key,
-            model_name=model_name
-        )
-
-        conflicting_claim_ids = set()
-        for li in logical_inconsistencies:
-            conflicting_claim_ids.add(li.claim_id_1)
-            if li.claim_id_2:
-                conflicting_claim_ids.add(li.claim_id_2)
-
-        # 6. Verify Each Claim against Evidence
-        verified_claims: List[ClaimItem] = []
-
-        for claim in extracted_claims:
-            claim_id = claim["claim_id"]
-            claim_text = claim["text"]
-            start_char = claim["start_char"]
-            end_char = claim["end_char"]
-
-            # Retrieve top matching passages deterministically
-            evidence_matches = retriever.retrieve(claim_text, top_k=request.options.top_k_passages)
-
-            # Public web search fallback if enabled and document evidence is scarce
-            if request.options.enable_web_search and (not evidence_matches or evidence_matches[0]["relevance_score"] < 0.35):
-                web_matches = PassageRetriever.search_web(claim_text, max_results=2)
-                if web_matches:
-                    evidence_matches = (evidence_matches or []) + web_matches
-
-            evidence_matches.sort(key=lambda x: (x["relevance_score"], x["source_name"]), reverse=True)
-
-            verdict = VerdictEnum.INSUFFICIENT_EVIDENCE
-            confidence = 0.50
-            explanation = ""
-            supporting_indices = []
-            contradicting_indices = []
-            has_source_disagreement = False
-
-            if use_llm:
-                try:
-                    (
-                        verdict,
-                        confidence,
-                        explanation,
-                        supporting_indices,
-                        contradicting_indices,
-                        has_source_disagreement
-                    ) = AuditEngine._verify_with_gemini(
-                        claim_text=claim_text,
-                        evidence_matches=evidence_matches,
-                        api_key=api_key,
-                        model_name=model_name
-                    )
-                except Exception as err:
-                    logger.error(f"Gemini API verification failed for {claim_id}: {type(err).__name__}")
-                    # NEVER silently fall back to BM25 when LLM mode is active
-                    status_code, err_detail = AuditEngine._classify_llm_error(err, model_name, f"claim verification ('{claim_text[:40]}...')")
-                    raise HTTPException(
-                        status_code=status_code,
-                        detail=err_detail
-                    )
-            else:
-                verdict, confidence, explanation = DeterministicVerifier.verify_claim(
-                    claim_text, evidence_matches
-                )
-                if verdict == VerdictEnum.SUPPORTED and evidence_matches:
-                    supporting_indices = [0]
-                elif verdict == VerdictEnum.CONTRADICTED and evidence_matches:
-                    contradicting_indices = [0]
-
-            is_internally_inconsistent = claim_id in conflicting_claim_ids
-
-            # Primary Category Assignment (Mutually Exclusive):
-            # 1. Contradicted by evidence -> CONTRADICTED
-            # 2. Mutually inconsistent with another claim & not contradicted -> LOGICAL_INCONSISTENCY
-            # 3. Supported by evidence -> SUPPORTED
-            # 4. Otherwise -> INSUFFICIENT_EVIDENCE
-            if verdict == VerdictEnum.CONTRADICTED:
-                primary_verdict = VerdictEnum.CONTRADICTED
-            elif is_internally_inconsistent and verdict != VerdictEnum.CONTRADICTED:
-                primary_verdict = VerdictEnum.LOGICAL_INCONSISTENCY
-            elif verdict == VerdictEnum.SUPPORTED:
-                primary_verdict = VerdictEnum.SUPPORTED
-            else:
-                primary_verdict = VerdictEnum.INSUFFICIENT_EVIDENCE
-
-            # Separate and populate Supporting and Contradicting Evidence
-            supporting_evidence: List[EvidenceItem] = []
-            contradicting_evidence: List[EvidenceItem] = []
-
-            for idx, match in enumerate(evidence_matches):
-                is_contradictory = (idx in contradicting_indices) or (
-                    primary_verdict == VerdictEnum.CONTRADICTED and not supporting_indices and idx == 0
-                )
-                is_supporting = (idx in supporting_indices) or (
-                    primary_verdict == VerdictEnum.SUPPORTED and not contradicting_indices and idx == 0
-                )
-
-                ev_item = EvidenceItem(
-                    excerpt=match["excerpt"],
-                    source_name=match["source_name"],
-                    page_number=match.get("page_number", 1),
-                    relevance_score=match["relevance_score"],
-                    match_type=match["match_type"],
-                    is_contradictory=is_contradictory,
-                    is_external=(match["match_type"] == "web_search")
-                )
-
-                if is_contradictory:
-                    contradicting_evidence.append(ev_item)
-                elif is_supporting:
-                    supporting_evidence.append(ev_item)
-
-            all_candidate_evidence = []
-            for match in evidence_matches:
-                all_candidate_evidence.append(EvidenceItem(
-                    excerpt=match["excerpt"],
-                    source_name=match["source_name"],
-                    page_number=match.get("page_number", 1),
-                    relevance_score=match["relevance_score"],
-                    match_type=match["match_type"],
-                    is_contradictory=(primary_verdict == VerdictEnum.CONTRADICTED),
-                    is_external=(match["match_type"] == "web_search")
-                ))
-
-            reported_evidence = supporting_evidence + contradicting_evidence
-            if not reported_evidence:
-                reported_evidence = all_candidate_evidence
-
-            source_references = list(dict.fromkeys(e.source_name for e in reported_evidence))
-
-            # Uncertainty Level classification (Low, Moderate, High)
-            if confidence >= 0.85:
-                uncertainty_level = "Low"
-            elif confidence >= 0.60:
-                uncertainty_level = "Moderate"
-            else:
-                uncertainty_level = "High"
-
-            inconsistency_note = None
-            if is_internally_inconsistent:
-                matching_conflicts = [
-                    c.explanation for c in logical_inconsistencies
-                    if c.claim_id_1 == claim_id or c.claim_id_2 == claim_id
-                ]
-                inconsistency_note = "; ".join(matching_conflicts) if matching_conflicts else "Contradicts another statement in the answer."
-
-            verified_claims.append(ClaimItem(
-                claim_id=claim_id,
-                text=claim_text,
-                start_char=start_char,
-                end_char=end_char,
-                verdict=primary_verdict,
-                confidence=confidence,
-                uncertainty_level=uncertainty_level,
-                explanation=explanation,
-                evidence=reported_evidence,
-                supporting_evidence=supporting_evidence,
-                contradicting_evidence=contradicting_evidence,
-                source_references=source_references,
-                inconsistency_details=inconsistency_note,
-                flags=ClaimFlags(
-                    is_ambiguous=(uncertainty_level == "High"),
-                    source_disagreement=has_source_disagreement,
-                    internal_contradiction=is_internally_inconsistent
-                )
-            ))
-
-        verified_claims.sort(key=lambda c: (c.start_char, c.claim_id))
-
-        # 7. Potentially Unsafe Recommendation Analysis
-        if use_llm:
-            try:
-                safety_analysis = SafetyAnalyzer.analyze_with_llm(
-                    answer_text=request.answer_text,
-                    claims=[c.model_dump() for c in verified_claims],
-                    passages=parsed_passages,
-                    api_key=api_key,
-                    model_name=model_name,
-                    raise_on_error=True
-                )
-            except Exception as e:
-                logger.error(f"LLM safety analysis failed: {type(e).__name__}")
-                status_code, err_detail = AuditEngine._classify_llm_error(e, model_name, "safety analysis")
-                raise HTTPException(
-                    status_code=status_code,
-                    detail=err_detail
-                )
-        else:
-            safety_analysis = SafetyAnalyzer.analyze_deterministic(
-                answer_text=request.answer_text,
-                claims=[c.model_dump() for c in verified_claims],
-                passages=parsed_passages
-            )
-
-        # 8. Compute Summary Metrics (Mutually Exclusive, exactly sums to total_claims)
-        supported_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.SUPPORTED)
-        contradicted_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.CONTRADICTED)
-        insufficient_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.INSUFFICIENT_EVIDENCE)
-        inconsistent_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.LOGICAL_INCONSISTENCY)
-        total_claims = len(verified_claims)
-
-        credibility_score, credibility_breakdown = AuditEngine.calculate_credibility(
-            supported_count=supported_count,
-            insufficient_count=insufficient_count,
-            contradicted_count=contradicted_count,
-            total_claims=total_claims,
-            inconsistent_count=inconsistent_count
-        )
-
-        summary = SummaryMetrics(
-            total_claims=total_claims,
-            supported_count=supported_count,
-            contradicted_count=contradicted_count,
-            insufficient_evidence_count=insufficient_count,
-            logical_inconsistency_count=inconsistent_count,
-            unsafe_recommendations_count=safety_analysis.flagged_count,
-            credibility_score=credibility_score,
-            credibility_breakdown=credibility_breakdown,
-            internal_contradictions_detected=len(logical_inconsistencies),
-            sources_analyzed=len(request.documents)
-        )
-
-        audit_config = {
-            "verification_mode": active_mode,
-            "model_name": model_name,
-            "deterministic_temperature": 0.0 if use_llm else None,
-            "top_k_passages": request.options.top_k_passages,
-            "similarity_threshold": request.options.similarity_threshold,
-            "enable_web_search": request.options.enable_web_search,
-            "sources_analyzed_count": len(request.documents)
-        }
-
-        response = AuditResponse(
-            audit_id=audit_id,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            verification_mode=active_mode,
-            model_info=model_name,
-            cached=False,
-            audit_configuration=audit_config,
-            limitations="Automated audit evaluated strictly against supplied reference documents. Self-reported confidence reflects internal certainty, not calibrated statistical probability of ground truth.",
-            summary=summary,
-            claims=verified_claims,
-            logical_inconsistencies=logical_inconsistencies,
-            safety_analysis=safety_analysis,
-            original_answer=request.answer_text
-        )
-
-        # Cache response
-        if len(_AUDIT_CACHE) >= _MAX_CACHE_SIZE:
-            _AUDIT_CACHE.pop(next(iter(_AUDIT_CACHE)))
-        _AUDIT_CACHE[cache_key] = response
-
-        logger.info(f"Audit {audit_id} complete. Score: {credibility_score}%. Claims: {total_claims}. Mode: {active_mode}.")
+        verified = [AuditEngine._audit_claim(c, request, retriever, judge, mode, inconsistencies, conflicted)
+                    for c in claims]
+        verified.sort(key=lambda c: (c.start_char, c.claim_id))
+        safety = AuditEngine._analyze_safety(request, verified, passages, mode)
+        response = AuditEngine._assemble(audit_id, request, mode, verified, inconsistencies, safety)
+        AuditEngine.cache.put(cache_key, response)
+        logger.info("Audit %s done. Score %s%%, claims %s, mode %s", audit_id, response.summary.credibility_score,
+                    len(verified), mode.active_mode)
         return response
 
+    # ------------------------------------------------------------ mode/cache
     @staticmethod
-    def _detect_logical_inconsistencies(
-        extracted_claims: List[Dict[str, Any]],
-        use_llm: bool,
-        api_key: str = "",
-        model_name: Optional[str] = None
-    ) -> List[LogicalInconsistencyItem]:
-        """
-        Detects pairwise mutual contradictions and logical non-sequiturs across claims.
-        Combines deterministic graph analysis with low-temperature LLM consistency checking.
-        """
-        logical_inconsistencies: List[LogicalInconsistencyItem] = []
-        seen_pairs = set()
+    def _resolve_mode(request: AuditRequest) -> RunMode:
+        opts = request.options
+        force_offline = opts.force_deterministic_fallback or opts.verification_mode == "offline"
+        api_key = (request.api_key or settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
+                   or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
+        explicit = opts.verification_mode == "llm"
+        if explicit and not api_key:
+            raise HTTPException(status_code=400, detail=(
+                "GEMINI_API_KEY is not configured on the backend environment. Please set GEMINI_API_KEY in the "
+                "server environment or switch to Offline Deterministic Mode in Advanced Settings."))
+        use_llm = not force_offline and bool(api_key)
+        return RunMode(use_llm, explicit, api_key, settings.DEFAULT_MODEL if use_llm else AuditEngine._offline_model_name())
 
-        # 1. Deterministic Rule Contradictions
-        internal_conflicts = DeterministicVerifier.detect_internal_contradictions(extracted_claims)
-        for idx, conflict in enumerate(internal_conflicts):
-            c1_id = conflict["claim_id_1"]
-            c2_id = conflict["claim_id_2"]
-            pair_key = tuple(sorted([c1_id, c2_id]))
-            seen_pairs.add(pair_key)
+    @staticmethod
+    def _offline_model_name() -> str:
+        nli = getattr(registry.nli, "name", None)
+        return f"Semantic NLI + Entity Engine ({nli})" if nli else "Entity & Lexical Engine (NLI model not loaded)"
 
-            c1_text = next((c["text"] for c in extracted_claims if c["claim_id"] == c1_id), "")
-            c2_text = next((c["text"] for c in extracted_claims if c["claim_id"] == c2_id), "")
+    @staticmethod
+    def _compute_cache_key(request: AuditRequest, mode: str, model_name: str) -> str:
+        norm_answer = " ".join(request.answer_text.strip().split())
+        docs = "|".join(
+            f"{d.filename}:{hashlib.sha256((d.content or '').encode('utf-8')).hexdigest()[:12]}:{d.content_type}"
+            for d in sorted(request.documents, key=lambda x: x.filename or ""))
+        o = request.options
+        sig = f"{mode}:{model_name}:{o.enable_web_search}:{o.top_k_passages}:{o.similarity_threshold}:{PROMPT_VERSION}"
+        return hashlib.sha256(f"{norm_answer}###{docs}###{sig}".encode("utf-8")).hexdigest()
 
-            logical_inconsistencies.append(LogicalInconsistencyItem(
-                conflict_id=f"conflict_{len(logical_inconsistencies) + 1}",
-                claim_id_1=c1_id,
-                claim_id_2=c2_id,
-                claim_text_1=c1_text,
-                claim_text_2=c2_text,
-                inconsistency_type="mutual_contradiction",
-                explanation=conflict["reason"]
-            ))
+    @staticmethod
+    def _as_cached(cached: AuditResponse, audit_id: str) -> AuditResponse:
+        copy = cached.model_copy(deep=True)
+        copy.audit_id, copy.cached = audit_id, True
+        copy.timestamp = datetime.now(timezone.utc).isoformat()
+        return copy
 
-        # 2. LLM Consistency Analysis (if in LLM mode and multiple claims exist)
+    # ------------------------------------------------------------ extraction
+    @staticmethod
+    def _extract_claims(request: AuditRequest, mode: RunMode) -> List[Dict[str, Any]]:
+        if not mode.use_llm:
+            return ClaimExtractor.extract_claims(request.answer_text)
+        try:
+            return ClaimExtractor.extract_claims_with_llm(request.answer_text, api_key=mode.api_key,
+                                                          model_name=mode.model_name)
+        except Exception as err:
+            logger.error("LLM claim extraction failed: %s - %s", type(err).__name__, err)
+            if mode.explicit_llm:
+                AuditEngine._raise_llm_error(err, mode, "claim extraction")
+            mode.use_llm, mode.model_name = False, AuditEngine._offline_model_name() + " (LLM failover)"
+            return ClaimExtractor.extract_claims(request.answer_text)
+
+    # ----------------------------------------------------------- per claim
+    @staticmethod
+    def _audit_claim(claim: Dict[str, Any], request: AuditRequest, retriever: PassageRetriever, judge: SemanticJudge,
+                     mode: RunMode, inconsistencies: List[LogicalInconsistencyItem], conflicted: set) -> ClaimItem:
+        text = claim["text"]
+        evidence = AuditEngine._gather_evidence(text, request, retriever)
+        judgement = AuditEngine._judge_claim(text, evidence, judge, mode)
+        inconsistent = claim["claim_id"] in conflicted
+        verdict = AuditEngine._primary_verdict(judgement.verdict, inconsistent)
+        supporting, contradicting, reported = AuditEngine._split_evidence(evidence, judgement, verdict)
+        notes = [li.explanation for li in inconsistencies if claim["claim_id"] in (li.claim_id_1, li.claim_id_2)]
+        category = (ErrorCategory.INTERNAL_CONTRADICTION if verdict == VerdictEnum.LOGICAL_INCONSISTENCY
+                    else judgement.category)
+        confidence = judgement.confidence
+        level = "Low" if confidence >= 0.85 else "Moderate" if confidence >= 0.60 else "High"
+        return ClaimItem(
+            claim_id=claim["claim_id"], text=text, start_char=claim["start_char"], end_char=claim["end_char"],
+            verdict=verdict, confidence=confidence, uncertainty_level=level, explanation=judgement.explanation,
+            evidence=reported, supporting_evidence=supporting, contradicting_evidence=contradicting,
+            source_references=list(dict.fromkeys(e.source_name for e in reported)),
+            inconsistency_details="; ".join(notes) if inconsistent and notes else (
+                "Contradicts another statement in the answer." if inconsistent else None),
+            error_category=category, error_span=AuditEngine._answer_span(judgement.span, claim, request.answer_text),
+            confidence_signals=judgement.signals,
+            flags=ClaimFlags(is_ambiguous=verdict == VerdictEnum.AMBIGUOUS,
+                             source_disagreement=judgement.source_disagreement, internal_contradiction=inconsistent))
+
+    @staticmethod
+    def _gather_evidence(text: str, request: AuditRequest, retriever: PassageRetriever) -> List[Dict[str, Any]]:
+        matches = retriever.retrieve(text, top_k=request.options.top_k_passages)
+        if request.options.enable_web_search and (not matches or matches[0]["relevance_score"] < 0.35):
+            matches = (matches or []) + PassageRetriever.search_web(text, max_results=2)
+        matches.sort(key=lambda m: (m["relevance_score"], m["source_name"]), reverse=True)
+        return matches
+
+    @staticmethod
+    def _judge_claim(text: str, evidence: List[Dict[str, Any]], judge: SemanticJudge, mode: RunMode) -> Judgement:
+        local = judge.judge(text, evidence)
+        if not mode.use_llm:
+            return local
+        try:
+            raw = AuditEngine._verify_with_gemini(claim_text=text, evidence_matches=evidence,
+                                                  api_key=mode.api_key, model_name=mode.model_name)
+        except Exception as err:
+            logger.error("Gemini verification failed: %s - %s", type(err).__name__, err)
+            if mode.explicit_llm:
+                AuditEngine._raise_llm_error(err, mode, f"claim verification ('{text[:40]}...')")
+            return local
+        top = max((float(e.get("relevance_score", 0.0)) for e in evidence), default=0.0)
+        return merge_with_local(local, coerce_llm_result(raw), text, top)
+
+    @staticmethod
+    def _verify_with_gemini(claim_text: str, evidence_matches: List[Dict[str, Any]], api_key: str,
+                            model_name: Optional[str] = None) -> LLMVerdict:
+        """Iterates as (verdict, confidence_hint, explanation, supporting, contradicting, source_disagreement)."""
+        return GeminiVerifier.verify(claim_text, evidence_matches, api_key, model_name)
+
+    @staticmethod
+    def _primary_verdict(verdict: VerdictEnum, inconsistent: bool) -> VerdictEnum:
+        if verdict == VerdictEnum.CONTRADICTED:
+            return verdict
+        if inconsistent:
+            return VerdictEnum.LOGICAL_INCONSISTENCY
+        return verdict if verdict in (VerdictEnum.SUPPORTED, VerdictEnum.AMBIGUOUS) else VerdictEnum.INSUFFICIENT_EVIDENCE
+
+    @staticmethod
+    def _split_evidence(matches: List[Dict[str, Any]], j: Judgement, verdict: VerdictEnum):
+        sup_idx, con_idx = set(j.supporting_idx), set(j.contradicting_idx)
+        if verdict == VerdictEnum.CONTRADICTED and not con_idx and not sup_idx and matches:
+            con_idx = {0}
+        if verdict == VerdictEnum.SUPPORTED and not sup_idx and not con_idx and matches:
+            sup_idx = {0}
+        items = [EvidenceItem(excerpt=m["excerpt"], source_name=m["source_name"], page_number=m.get("page_number", 1),
+                              relevance_score=m["relevance_score"], match_type=m["match_type"],
+                              is_contradictory=i in con_idx, is_external=m["match_type"] == "web_search")
+                 for i, m in enumerate(matches)]
+        supporting = [e for i, e in enumerate(items) if i in sup_idx and i not in con_idx]
+        contradicting = [e for i, e in enumerate(items) if i in con_idx]
+        return supporting, contradicting, (supporting + contradicting) or items
+
+    @staticmethod
+    def _answer_span(span: Optional[ClaimSpan], claim: Dict[str, Any], answer: str) -> Optional[ErrorSpan]:
+        """Map a claim-relative span onto the original answer, verifying answer[start:end] == text."""
+        if span is None:
+            return None
+        region_start = claim["start_char"]
+        offset = answer[region_start:claim["end_char"]].find(span.text)
+        if offset < 0:
+            return None
+        start = region_start + offset
+        return ErrorSpan(start_char=start, end_char=start + len(span.text), text=answer[start:start + len(span.text)],
+                         precision=span.precision)
+
+    # ----------------------------------------------------------- consistency
+    @staticmethod
+    def _detect_logical_inconsistencies(extracted_claims: List[Dict[str, Any]], use_llm: bool, api_key: str = "",
+                                        model_name: Optional[str] = None) -> List[LogicalInconsistencyItem]:
+        """Local value/polarity/NLI checks always run; the LLM adds reasoning-level checks when enabled."""
+        local = consistency.find_local_conflicts(extracted_claims, registry.nli)
+        items = consistency.to_items(local, extracted_claims)
         if use_llm and len(extracted_claims) >= 2:
             try:
-                resolved_model = model_name or settings.DEFAULT_MODEL
-                client = genai.Client(api_key=(api_key or "").strip().strip('"').strip("'"))
-                claims_payload = [{"claim_id": c["claim_id"], "text": c["text"]} for c in extracted_claims]
-                prompt = f"""You are a formal logic and consistency auditor. Inspect these atomic claims extracted from an AI-generated answer.
-Identify ANY mutual contradictions (e.g. conflicting numerical metrics, opposite outcomes for the same entity) or logical non-sequiturs.
+                seen = {tuple(sorted((i.claim_id_1, i.claim_id_2))) for i in items}
+                extra = [c for c in consistency.find_llm_conflicts(extracted_claims, api_key, model_name)
+                         if tuple(sorted((c.get("claim_id_1", ""), c.get("claim_id_2", "")))) not in seen]
+                items += consistency.to_items(extra, extracted_claims, start_index=len(items))
+            except Exception as err:
+                logger.warning("LLM logical inconsistency check skipped on error: %s", err)
+        return items
 
-CLAIMS:
-{json.dumps(claims_payload, indent=2)}
+    # ----------------------------------------------------------------- safety
+    @staticmethod
+    def _analyze_safety(request: AuditRequest, claims: List[ClaimItem], passages, mode: RunMode) -> SafetyAnalysisResult:
+        dumped = [c.model_dump() for c in claims]
+        if not mode.use_llm:
+            return SafetyAnalyzer.analyze_deterministic(answer_text=request.answer_text, claims=dumped, passages=passages)
+        try:
+            return SafetyAnalyzer.analyze_with_llm(answer_text=request.answer_text, claims=dumped, passages=passages,
+                                                   api_key=mode.api_key, model_name=mode.model_name, raise_on_error=True)
+        except Exception as err:
+            logger.error("LLM safety analysis failed: %s", type(err).__name__)
+            AuditEngine._raise_llm_error(err, mode, "safety analysis")
 
-RULES:
-- Only flag clear, explicit logical conflicts.
-- Do NOT flag ordinary complementary or sequential claims.
-- Return ONLY valid JSON matching:
-{{
-  "conflicts": [
-    {{
-      "claim_id_1": "claim_x",
-      "claim_id_2": "claim_y",
-      "inconsistency_type": "mutual_contradiction" | "non_sequitur",
-      "explanation": "concise explanation of the contradiction or reasoning gap"
-    }}
-  ]
-}}"""
-                resp = client.models.generate_content(
-                    model=resolved_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.0,
-                        response_mime_type="application/json"
-                    )
-                )
-                raw_text = resp.text.strip()
-                if raw_text.startswith("```"):
-                    raw_text = raw_text.split("\n", 1)[-1]
-                    if raw_text.endswith("```"):
-                        raw_text = raw_text.rsplit("```", 1)[0]
-                    raw_text = raw_text.strip()
-
-                data = json.loads(raw_text)
-                llm_conflicts = data.get("conflicts", [])
-                for lc in llm_conflicts:
-                    c1 = lc.get("claim_id_1")
-                    c2 = lc.get("claim_id_2")
-                    if not c1 or not c2 or c1 == c2:
-                        continue
-                    pair_key = tuple(sorted([c1, c2]))
-                    if pair_key in seen_pairs:
-                        continue
-                    seen_pairs.add(pair_key)
-
-                    c1_text = next((c["text"] for c in extracted_claims if c["claim_id"] == c1), "")
-                    c2_text = next((c["text"] for c in extracted_claims if c["claim_id"] == c2), "")
-
-                    logical_inconsistencies.append(LogicalInconsistencyItem(
-                        conflict_id=f"conflict_{len(logical_inconsistencies) + 1}",
-                        claim_id_1=c1,
-                        claim_id_2=c2,
-                        claim_text_1=c1_text,
-                        claim_text_2=c2_text,
-                        inconsistency_type=lc.get("inconsistency_type", "mutual_contradiction"),
-                        explanation=lc.get("explanation", "Claims assert mutually incompatible statements.")
-                    ))
-            except Exception as e:
-                logger.warning(f"LLM logical inconsistency check skipped on error: {e}")
-
-        return logical_inconsistencies
+    # ---------------------------------------------------------------- report
+    @staticmethod
+    def calculate_credibility(supported_count: int, insufficient_count: int, contradicted_count: int,
+                              total_claims: int, inconsistent_count: int = 0, ambiguous_count: int = 0
+                              ) -> Tuple[float, Dict[str, Any]]:
+        """Supported = 1 point; unverified or ambiguous = 0.5 (neutral); contradicted/inconsistent = 0."""
+        neutral = insufficient_count + ambiguous_count
+        score = round(((supported_count + 0.5 * neutral) / total_claims) * 100.0, 1) if total_claims else 100.0
+        return score, {
+            "formula": "(Supported + 0.5 * (Insufficient + Ambiguous)) / Total * 100",
+            "supported_claims": supported_count, "insufficient_evidence_claims": insufficient_count,
+            "ambiguous_claims": ambiguous_count, "contradicted_claims": contradicted_count,
+            "logical_inconsistency_claims": inconsistent_count, "total_claims": total_claims,
+            "supported_points": float(supported_count), "insufficient_points": float(0.5 * insufficient_count),
+            "ambiguous_points": float(0.5 * ambiguous_count),
+            "penalized_points": float(contradicted_count + inconsistent_count)}
 
     @staticmethod
-    def calculate_credibility(
-        supported_count: int,
-        insufficient_count: int,
-        contradicted_count: int,
-        total_claims: int,
-        inconsistent_count: int = 0
-    ) -> Tuple[float, Dict[str, Any]]:
-        """
-        Calculates credibility score with transparent mathematical breakdown:
-        - Supported claims: 1.0 point
-        - Insufficient evidence claims: 0.5 point (unverified, neutral)
-        - Contradicted claims: 0.0 point (penalized)
-        - Logical inconsistencies: 0.0 point (penalized)
-        """
-        if total_claims > 0:
-            raw_score = ((supported_count + 0.5 * insufficient_count) / total_claims) * 100.0
-            credibility_score = round(raw_score, 1)
-        else:
-            credibility_score = 100.0
-
-        credibility_breakdown = {
-            "formula": "(Supported + 0.5 * Insufficient) / Total * 100",
-            "supported_claims": supported_count,
-            "insufficient_evidence_claims": insufficient_count,
-            "contradicted_claims": contradicted_count,
-            "logical_inconsistency_claims": inconsistent_count,
-            "total_claims": total_claims,
-            "supported_points": float(supported_count),
-            "insufficient_points": float(0.5 * insufficient_count),
-            "penalized_points": float(contradicted_count + inconsistent_count)
-        }
-        return credibility_score, credibility_breakdown
-
-    @staticmethod
-    def _verify_with_gemini(
-        claim_text: str,
-        evidence_matches: List[Dict[str, Any]],
-        api_key: str,
-        model_name: Optional[str] = None
-    ) -> Tuple[VerdictEnum, float, str, List[int], List[int], bool]:
-        """
-        Calls Gemini API with deterministic temperature=0.0 and schema validation.
-        Returns: (verdict, confidence, explanation, supporting_indices, contradicting_indices, source_disagreement)
-        """
-        resolved_model = model_name or settings.DEFAULT_MODEL
-        client = genai.Client(api_key=(api_key or "").strip().strip('"').strip("'"))
-
-        indexed_passages = []
-        for idx, e in enumerate(evidence_matches):
-            indexed_passages.append(
-                f"[{idx}] Source: {e['source_name']} (Page {e.get('page_number', 1)}):\n\"{e['excerpt']}\""
-            )
-        evidence_str = "\n\n".join(indexed_passages) or "No relevant reference passages found in provided documents."
-
-        prompt = f"""You are a rigorous, evidence-grounded AI Answer Auditor. Evaluate the CLAIM strictly against the REFERENCE EVIDENCE PASSAGES.
-
-CLAIM:
-\"{claim_text}\"
-
-REFERENCE EVIDENCE PASSAGES:
-{evidence_str}
-
-CLASSIFICATION CRITERIA:
-1. "SUPPORTED": The reference evidence directly affirms, substantiates, or directly entails the claim.
-2. "CONTRADICTED": The reference evidence directly conflicts with the claim (e.g. conflicting numerical figure, opposite direction/polarity, contradictory fact).
-3. "INSUFFICIENT_EVIDENCE": The reference evidence does not contain sufficient facts to prove or disprove the claim. Absence of evidence is NOT proof of falsehood.
-
-STRICT INTEGRITY RULES:
-- Never fabricate citations, URLs, page numbers, or external facts. Only reference the provided numbered passages.
-- Distinguish between missing evidence (INSUFFICIENT_EVIDENCE) and direct contradiction (CONTRADICTED).
-- In "supporting_indices", specify 0-based indices of passages that directly support the claim.
-- In "contradicting_indices", specify 0-based indices of passages that directly contradict the claim.
-- If multiple sources disagree with each other, set "source_disagreement": true.
-- Provide a concise 1-2 sentence factual explanation.
-
-Return ONLY a valid JSON object matching:
-{{
-  "verdict": "SUPPORTED" | "CONTRADICTED" | "INSUFFICIENT_EVIDENCE",
-  "confidence": 0.0 to 1.0,
-  "explanation": "concise evidence-grounded explanation",
-  "supporting_indices": [0],
-  "contradicting_indices": [],
-  "source_disagreement": false
-}}"""
-
-        for attempt in range(2):
-            response = client.models.generate_content(
-                model=resolved_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    response_mime_type="application/json"
-                )
-            )
-
-            raw_text = response.text.strip()
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("\n", 1)[-1]
-                if raw_text.endswith("```"):
-                    raw_text = raw_text.rsplit("```", 1)[0]
-                raw_text = raw_text.strip()
-
-            try:
-                data = json.loads(raw_text)
-                verdict_str = data.get("verdict", "INSUFFICIENT_EVIDENCE")
-                if verdict_str in ("SUPPORTED", "CONTRADICTED", "INSUFFICIENT_EVIDENCE"):
-                    verdict = VerdictEnum(verdict_str)
-                else:
-                    verdict = VerdictEnum.INSUFFICIENT_EVIDENCE
-
-                confidence = max(0.0, min(1.0, float(data.get("confidence", 0.85))))
-                explanation = str(data.get("explanation", "Verified against reference evidence passages.")).strip()
-
-                sup_raw = data.get("supporting_indices", [])
-                con_raw = data.get("contradicting_indices", [])
-                num_matches = len(evidence_matches)
-
-                supporting_indices = [int(i) for i in sup_raw if isinstance(i, int) and 0 <= i < num_matches]
-                contradicting_indices = [int(i) for i in con_raw if isinstance(i, int) and 0 <= i < num_matches]
-                source_disagreement = bool(data.get("source_disagreement", False))
-
-                return verdict, confidence, explanation, supporting_indices, contradicting_indices, source_disagreement
-            except Exception as parse_err:
-                if attempt == 1:
-                    raise parse_err
-                logger.warning(f"Retrying malformed Gemini JSON output (attempt {attempt + 1}): {parse_err}")
-
-        return VerdictEnum.INSUFFICIENT_EVIDENCE, 0.50, "Verification inconclusive.", [], [], False
+    def _assemble(audit_id: str, request: AuditRequest, mode: RunMode, claims: List[ClaimItem],
+                  inconsistencies: List[LogicalInconsistencyItem], safety: SafetyAnalysisResult) -> AuditResponse:
+        count = lambda v: sum(1 for c in claims if c.verdict == v)  # noqa: E731
+        score, breakdown = AuditEngine.calculate_credibility(
+            count(VerdictEnum.SUPPORTED), count(VerdictEnum.INSUFFICIENT_EVIDENCE), count(VerdictEnum.CONTRADICTED),
+            len(claims), count(VerdictEnum.LOGICAL_INCONSISTENCY), count(VerdictEnum.AMBIGUOUS))
+        summary = SummaryMetrics(
+            total_claims=len(claims), supported_count=count(VerdictEnum.SUPPORTED),
+            contradicted_count=count(VerdictEnum.CONTRADICTED),
+            insufficient_evidence_count=count(VerdictEnum.INSUFFICIENT_EVIDENCE),
+            ambiguous_count=count(VerdictEnum.AMBIGUOUS), logical_inconsistency_count=count(VerdictEnum.LOGICAL_INCONSISTENCY),
+            unsafe_recommendations_count=safety.flagged_count, credibility_score=score, credibility_breakdown=breakdown,
+            internal_contradictions_detected=len(inconsistencies), sources_analyzed=len(request.documents))
+        opts = request.options
+        warnings = [] if (mode.use_llm or registry.nli) else [NO_NLI_WARNING]
+        return AuditResponse(
+            audit_id=audit_id, timestamp=datetime.now(timezone.utc).isoformat(), verification_mode=mode.active_mode,
+            model_info=mode.model_name, cached=False, warnings=warnings,
+            audit_configuration={
+                "verification_mode": mode.active_mode, "model_name": mode.model_name,
+                "deterministic_temperature": 0.0 if mode.use_llm else None, "top_k_passages": opts.top_k_passages,
+                "similarity_threshold": opts.similarity_threshold, "enable_web_search": opts.enable_web_search,
+                "sources_analyzed_count": len(request.documents), **registry.describe()},
+            limitations=("Automated audit evaluated strictly against supplied reference documents. Confidence is computed "
+                         "from verification signals (meaning-model probability, verified value checks, evidence quality); "
+                         "it is not a calibrated probability of ground truth."),
+            summary=summary, claims=claims, logical_inconsistencies=inconsistencies, safety_analysis=safety,
+            original_answer=request.answer_text)

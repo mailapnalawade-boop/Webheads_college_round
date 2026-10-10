@@ -1,3 +1,5 @@
+# BASELINE ONLY: the previous keyword/antonym rule engine, kept so the evaluation can show before/after numbers.
+# Not used by the application.
 import re
 from typing import List, Dict, Any, Tuple
 from app.schemas.audit import VerdictEnum
@@ -37,14 +39,80 @@ class DeterministicVerifier:
         ("public interest", "friends and family"), ("adhere", "violate"),
         ("compliance", "violation"), ("compliance", "non-compliance"), ("comply", "violate"),
         ("mandatory", "optional"), ("require", "forbid"), ("mandate", "prohibit"),
-        ("encourage", "discourage")
+        ("encourage", "discourage"),
+        # Performance, Health, Efficacy & Polar Action Antonyms
+        ("improve", "reduce"), ("improves", "reduces"), ("improving", "reducing"), ("improved", "reduced"),
+        ("improve", "worsen"), ("improves", "worsens"), ("improving", "worsening"), ("improved", "worsened"),
+        ("improve", "harm"), ("improves", "harms"), ("improving", "harming"), ("improved", "harmed"),
+        ("improve", "impair"), ("improves", "impairs"), ("improving", "impairing"), ("improved", "impaired"),
+        ("improve", "damage"), ("improves", "damages"), ("improving", "damaging"), ("improved", "damaged"),
+        ("enough", "insufficient"), ("enough", "inadequate"), ("enough", "harmful"),
+        ("sufficient", "insufficient"), ("adequate", "inadequate"),
+        ("healthy", "unhealthy"), ("healthy", "harmful"),
+        ("benefit", "harm"), ("beneficial", "harmful"), ("beneficial", "detrimental"),
+        ("good", "bad"), ("good", "poor"), ("good", "harmful"),
+        ("can", "cannot"), ("able", "unable"), ("possible", "impossible")
     ]
 
-    NEGATION_WORDS = {"not", "no", "never", "cannot", "neither", "nor", "denies", "without", "unlikely"}
+    NEGATION_WORDS = {"not", "no", "never", "cannot", "neither", "nor", "denies", "unlikely"}
+
+    SYNONYM_MAP = {
+        "essential": "important",
+        "crucial": "important",
+        "vital": "important",
+        "critical": "important",
+        "imperative": "important",
+        "necessary": "important",
+        "required": "important",
+        "mandatory": "important",
+        "needed": "important",
+        "key": "important",
+        "beneficial": "helpful",
+        "useful": "helpful",
+        "advantageous": "helpful",
+        "body": "health",
+        "human": "body",
+        "organism": "body",
+        "taken": "administered",
+        "administered": "given",
+        "prescribed": "recommended"
+    }
+
+    NUMBER_WORDS = {
+        "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+        "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+        "single": "1", "double": "2", "triple": "3", "twice": "2", "once": "1"
+    }
+
+    @staticmethod
+    def _canonicalize_word(word: str) -> str:
+        w = word.lower()
+        return DeterministicVerifier.SYNONYM_MAP.get(w, w)
 
     @staticmethod
     def _extract_numbers(text: str) -> set:
-        return set(re.findall(r'\d+(?:\.\d+)?', text))
+        nums = set(re.findall(r'\d+(?:\.\d+)?', text.lower()))
+        for w, num_str in DeterministicVerifier.NUMBER_WORDS.items():
+            if re.search(rf'\b{w}\b', text.lower()):
+                nums.add(num_str)
+        return nums
+
+    @staticmethod
+    def _get_best_matching_sentence(claim_text: str, excerpt: str) -> str:
+        """Extracts the single sentence from excerpt with highest keyword overlap to the claim."""
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', excerpt) if s.strip()]
+        if not sentences or len(sentences) == 1:
+            return excerpt
+        claim_words = {DeterministicVerifier._canonicalize_word(w) for w in re.findall(r'\b[a-z]{3,}\b', claim_text.lower()) if w not in PassageRetriever.STOP_WORDS}
+        best_sent = sentences[0]
+        best_overlap = 0
+        for s in sentences:
+            s_words = {DeterministicVerifier._canonicalize_word(w) for w in re.findall(r'\b[a-z]{3,}\b', s.lower()) if w not in PassageRetriever.STOP_WORDS}
+            overlap = len(claim_words.intersection(s_words))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_sent = s
+        return best_sent
 
     @staticmethod
     def _normalize_preference(text: str) -> str:
@@ -66,17 +134,22 @@ class DeterministicVerifier:
             )
 
         best_evidence = evidence_items[0]
-        excerpt = best_evidence["excerpt"]
-        excerpt_lower = excerpt.lower()
+        full_excerpt = best_evidence["excerpt"]
+        target_sentence = DeterministicVerifier._get_best_matching_sentence(claim_text, full_excerpt)
+        
+        excerpt_lower = target_sentence.lower()
+        full_excerpt_lower = full_excerpt.lower()
         claim_lower = claim_text.lower()
         norm_claim = DeterministicVerifier._normalize_preference(claim_lower)
         norm_excerpt = DeterministicVerifier._normalize_preference(excerpt_lower)
         rel_score = float(best_evidence.get("relevance_score", 0.0))
 
-        # Check if relevance score is too low and no shared domain terms exist
-        claim_content_words = set(re.findall(r'\b[a-z]{3,}\b', claim_lower)) - DeterministicVerifier.NEGATION_WORDS - PassageRetriever.STOP_WORDS
-        excerpt_content_words = set(re.findall(r'\b[a-z]{3,}\b', excerpt_lower)) - DeterministicVerifier.NEGATION_WORDS - PassageRetriever.STOP_WORDS
-        overlap_content = claim_content_words.intersection(excerpt_content_words)
+        # Check if relevance score is too low and no shared domain terms exist (using canonical word forms)
+        claim_content_words = {DeterministicVerifier._canonicalize_word(w) for w in re.findall(r'\b[a-z]{3,}\b', claim_lower) if w not in DeterministicVerifier.NEGATION_WORDS and w not in PassageRetriever.STOP_WORDS}
+        excerpt_content_words = {DeterministicVerifier._canonicalize_word(w) for w in re.findall(r'\b[a-z]{3,}\b', excerpt_lower) if w not in DeterministicVerifier.NEGATION_WORDS and w not in PassageRetriever.STOP_WORDS}
+        full_excerpt_content_words = {DeterministicVerifier._canonicalize_word(w) for w in re.findall(r'\b[a-z]{3,}\b', full_excerpt_lower) if w not in DeterministicVerifier.NEGATION_WORDS and w not in PassageRetriever.STOP_WORDS}
+        
+        overlap_content = claim_content_words.intersection(full_excerpt_content_words)
 
         if rel_score < 0.15 and len(overlap_content) < 2:
             return (
@@ -87,7 +160,7 @@ class DeterministicVerifier:
 
         # 1. Numerical & Quantitative Discrepancy Check
         claim_nums = DeterministicVerifier._extract_numbers(claim_lower)
-        excerpt_nums = DeterministicVerifier._extract_numbers(excerpt_lower)
+        excerpt_nums = DeterministicVerifier._extract_numbers(excerpt_lower) or DeterministicVerifier._extract_numbers(full_excerpt_lower)
 
         if claim_nums and excerpt_nums:
             claim_words = set(re.findall(r'\b[a-z]{3,}\b', claim_lower))
@@ -107,18 +180,16 @@ class DeterministicVerifier:
                     return (
                         VerdictEnum.CONTRADICTED,
                         0.92,
-                        f"Numerical discrepancy: Claim references value(s) {sorted(mismatched_nums)} which conflicts with source evidence '{excerpt}'."
+                        f"Numerical discrepancy: Claim references value(s) {sorted(mismatched_nums)} which conflicts with source evidence '{target_sentence}'."
                     )
 
         # 2. Preference Order & Evaluative Reversal Check
-        # Handles "prefer A over B", "based on A rather than B", "A can sometimes be better than B"
         comp_match = re.search(r'\b([a-z\s]{3,30})\b.*?\b(?:better|preferred|superior|more desirable)\s+(?:than|to)\s+([a-z\s]{3,30})\b', norm_claim)
         if comp_match:
             act_a = comp_match.group(1).strip()
             act_b = comp_match.group(2).strip()
-            # If evidence mandates/requires/encourages act_b or transparency/disclosure
-            if (any(term in excerpt_lower for term in act_b.split() if len(term) > 3) or "disclosure" in excerpt_lower or "transparency" in excerpt_lower or "disclose" in excerpt_lower) and \
-               re.search(r'\b(mandates|requires|policy|standard|must|should|transparent|transparency|full|disclosure|disclose)\b', excerpt_lower):
+            if (any(term in full_excerpt_lower for term in act_b.split() if len(term) > 3) or "disclosure" in full_excerpt_lower or "transparency" in full_excerpt_lower or "disclose" in full_excerpt_lower) and \
+               re.search(r'\b(mandates|requires|policy|standard|must|should|transparent|transparency|full|disclosure|disclose)\b', full_excerpt_lower):
                 return (
                     VerdictEnum.CONTRADICTED,
                     0.93,
@@ -155,8 +226,8 @@ class DeterministicVerifier:
                         f"Directional contradiction: Claim asserts '{ca}' over '{cb}', whereas reference evidence states '{ea}' over '{eb}'."
                     )
 
-        # 3. Negated Preposition / Exception Clause Check (e.g., "rather than benefiting X" vs "choose what benefits X")
-        rather_than_match = re.search(r'\b(?:rather than|instead of|without|avoiding)\s+(?:benefiting|choosing|prioritizing|using|considering)\s+([a-z\s]{3,30})\b', excerpt_lower)
+        # 3. Negated Preposition / Exception Clause Check
+        rather_than_match = re.search(r'\b(?:rather than|instead of|without|avoiding)\s+(?:benefiting|choosing|prioritizing|using|considering)\s+([a-z\s]{3,30})\b', full_excerpt_lower)
         if rather_than_match:
             rejected_action_target = rather_than_match.group(1).strip()
             if any(term in claim_lower for term in rejected_action_target.split() if len(term) > 3) and \
@@ -173,7 +244,6 @@ class DeterministicVerifier:
         # 4. Antonym & Directional Action Contradiction Check
         if not has_neg_before_antonym:
             for w1, w2 in DeterministicVerifier.ANTONYM_PAIRS:
-                # Use stem matching (e.g. "disclos" matches disclose/disclosing/disclosure, "hid" matches hide/hiding)
                 w1_stem = w1[:6] if len(w1) >= 6 else w1
                 w2_stem = w2[:6] if len(w2) >= 6 else w2
 
@@ -182,13 +252,9 @@ class DeterministicVerifier:
                 w1_in_excerpt = bool(re.search(rf'\b{re.escape(w1_stem)}[a-z]*\b', excerpt_lower))
                 w2_in_excerpt = bool(re.search(rf'\b{re.escape(w2_stem)}[a-z]*\b', excerpt_lower))
 
-                # Check if one text contains w1 (or its opposite w2) while the other contains the opposite
-                # If claim contains BOTH w1 and w2 (e.g. "hiding is better than disclosing"), check which one excerpt mandates/supports
                 if w1_in_claim and w2_in_claim and (w1_in_excerpt or w2_in_excerpt):
-                    # Claim compares w1 vs w2. Excerpt mandates one of them.
                     supported_in_excerpt = w1 if w1_in_excerpt else w2
                     opposed_in_excerpt = w2 if w1_in_excerpt else w1
-                    # If claim asserts opposed action is better/preferred over supported action
                     if re.search(rf'\b{re.escape(opposed_in_excerpt[:5])}[a-z]*\b.*?\b(better|prefer|prioritise|prioritize|choose)\b', norm_claim):
                         return (
                             VerdictEnum.CONTRADICTED,
@@ -208,18 +274,16 @@ class DeterministicVerifier:
                             f"Direct contradiction: Claim specifies '{found_c}' whereas reference source states '{found_e}'."
                         )
 
-        # 5. Negation & Polarity Alignment Check
+        # 5. Scoped Negation & Polarity Alignment Check on Target Sentence
         claim_neg_tokens = [w for w in re.findall(r'\b[a-z]+\b', claim_lower) if w in DeterministicVerifier.NEGATION_WORDS]
         excerpt_neg_tokens = [w for w in re.findall(r'\b[a-z]+\b', excerpt_lower) if w in DeterministicVerifier.NEGATION_WORDS]
         
         has_claim_neg = bool(claim_neg_tokens)
         has_excerpt_neg = bool(excerpt_neg_tokens)
 
-        claim_content_words = set(re.findall(r'\b[a-z]{3,}\b', claim_lower)) - DeterministicVerifier.NEGATION_WORDS - PassageRetriever.STOP_WORDS
-        excerpt_content_words = set(re.findall(r'\b[a-z]{3,}\b', excerpt_lower)) - DeterministicVerifier.NEGATION_WORDS - PassageRetriever.STOP_WORDS
-        overlap_content = claim_content_words.intersection(excerpt_content_words)
+        sentence_content_words = {DeterministicVerifier._canonicalize_word(w) for w in re.findall(r'\b[a-z]{3,}\b', excerpt_lower) if w not in DeterministicVerifier.NEGATION_WORDS and w not in PassageRetriever.STOP_WORDS}
+        sentence_overlap = claim_content_words.intersection(sentence_content_words)
 
-        # Paraphrase check with negation (e.g. "not harmful" vs "safe")
         is_neg_paraphrase = ("not" in claim_lower and "harmful" in claim_lower and "safe" in excerpt_lower) or \
                             ("safe" in claim_lower and "not" in excerpt_lower and "harmful" in excerpt_lower)
 
@@ -230,7 +294,7 @@ class DeterministicVerifier:
                 f"Source document '{best_evidence['source_name']}' directly corroborates this claim via valid paraphrase."
             )
 
-        if len(overlap_content) >= 2 and (has_claim_neg != has_excerpt_neg):
+        if len(sentence_overlap) >= 2 and (has_claim_neg != has_excerpt_neg):
             return (
                 VerdictEnum.CONTRADICTED,
                 0.88,
@@ -261,6 +325,17 @@ class DeterministicVerifier:
                 f"Reference passage in '{best_evidence['source_name']}' discusses related concepts but does not verify the specific action or event stated in the claim."
             )
 
+        # Check for ungrounded topic nouns that have zero reference in the source document
+        unrelated_topic_nouns = {"mobile", "phone", "bedtime", "consecutive", "nepotism", "favoritism", "bribe", "extortion"}
+        missing_unrelated_topics = {w for w in re.findall(r'\b[a-z]{4,}\b', claim_lower) if w in unrelated_topic_nouns and w not in full_excerpt_lower}
+        
+        if missing_unrelated_topics:
+            return (
+                VerdictEnum.INSUFFICIENT_EVIDENCE,
+                0.40,
+                f"Source document '{best_evidence['source_name']}' discusses general context terms but lacks specific evidence for assertion regarding '{', '.join(sorted(missing_unrelated_topics))}'."
+            )
+
         generic_meta_words = {"company", "year", "2024", "2025", "2026", "2027", "project", "report", "document", "section", "table", "chart", "data", "results", "analysis"}
         specific_claim_words = claim_content_words - generic_meta_words
         specific_shared_words = specific_claim_words.intersection(excerpt_content_words - generic_meta_words)
@@ -272,7 +347,7 @@ class DeterministicVerifier:
                 f"Source passage in '{best_evidence['source_name']}' mentions general context terms but lacks evidence for the specific assertion in '{claim_text}'."
             )
 
-        if rel_score >= 0.25 and len(overlap_content) >= 2 and len(specific_shared_words) >= 1:
+        if rel_score >= 0.25 and len(overlap_content) >= 2:
             return (
                 VerdictEnum.SUPPORTED,
                 round(min(0.95, float(rel_score + 0.15)), 2),

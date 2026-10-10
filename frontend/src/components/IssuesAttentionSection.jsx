@@ -10,7 +10,7 @@ export default function IssuesAttentionSection({
 }) {
   // Filter for issues (Contradicted, Unverified, or Internal Contradiction)
   const rawIssues = claims.filter(
-    (c) => c.verdict === 'CONTRADICTED' || c.verdict === 'INSUFFICIENT_EVIDENCE' || c.flags?.internal_contradiction
+    (c) => c.verdict === 'CONTRADICTED' || c.verdict === 'INSUFFICIENT_EVIDENCE' || c.verdict === 'AMBIGUOUS' || c.flags?.internal_contradiction
   );
 
   // Sort: Contradicted & Internal Contradictions first, then Unverified
@@ -22,7 +22,7 @@ export default function IssuesAttentionSection({
 
   const issues = deduplicateClaims(sortedIssues);
   const contradictedCount = issues.filter(c => c.verdict === 'CONTRADICTED').length;
-  const unverifiedCount = issues.filter(c => c.verdict === 'INSUFFICIENT_EVIDENCE').length;
+  const unverifiedCount = issues.filter(c => c.verdict === 'INSUFFICIENT_EVIDENCE' || c.verdict === 'AMBIGUOUS').length;
 
   if (issues.length === 0) {
     return (

@@ -61,6 +61,7 @@ export default function ClaimHighlighter({
         result.push({
           isClaim: true,
           claim: c,
+          start: segStart,
           text: originalText.slice(segStart, segEnd)
         });
         cursor = segEnd;
@@ -105,6 +106,14 @@ export default function ClaimHighlighter({
           badgeColor: '#c084fc',
           label: 'LOGIC CONFLICT'
         };
+      case 'AMBIGUOUS':
+        return {
+          bg: isSelected ? 'rgba(96, 165, 250, 0.38)' : 'rgba(96, 165, 250, 0.18)',
+          borderBottom: '2px dashed #60a5fa',
+          color: '#ffffff',
+          badgeColor: '#60a5fa',
+          label: 'AMBIGUOUS'
+        };
       case 'INSUFFICIENT_EVIDENCE':
       default:
         return {
@@ -115,6 +124,35 @@ export default function ClaimHighlighter({
           label: 'UNVERIFIED'
         };
     }
+  };
+
+  // Highlights the exact words that contain the error (backend verifies answer[start:end] === text)
+  const renderWithErrorSpan = (seg, claim) => {
+    const span = claim.error_span;
+    if (!span || claim.verdict === 'SUPPORTED') return seg.text;
+    const from = span.start_char - seg.start;
+    const to = span.end_char - seg.start;
+    if (from < 0 || to > seg.text.length || from >= to) return seg.text;
+    const approximate = span.precision !== 'exact';
+    return (
+      <>
+        {seg.text.slice(0, from)}
+        <u
+          title={approximate ? 'Suspected error (approximate)' : 'Exact error: ' + span.text}
+          style={{
+            background: 'rgba(244, 63, 94, 0.55)',
+            textDecoration: approximate ? 'underline dashed #fff' : 'underline wavy #fff',
+            textUnderlineOffset: '3px',
+            borderRadius: '3px',
+            padding: '0 2px',
+            fontWeight: 700
+          }}
+        >
+          {seg.text.slice(from, to)}
+        </u>
+        {seg.text.slice(to)}
+      </>
+    );
   };
 
   const handleSpanClick = (claimId) => {
@@ -207,7 +245,7 @@ export default function ClaimHighlighter({
               }}
               title={`[${claim.verdict}] ${claim.text} — Click to inspect analysis`}
             >
-              {seg.text}
+              {renderWithErrorSpan(seg, claim)}
               <span
                 style={{
                   fontSize: '0.65rem',
