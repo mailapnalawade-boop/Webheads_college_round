@@ -43,12 +43,7 @@ class AuditEngine:
         api_key = request.api_key or settings.GEMINI_API_KEY
         use_live_api = bool(api_key) and not request.options.force_deterministic_fallback
 
-        verified_claims = []
-        supported_count = 0
-        contradicted_count = 0
-        insufficient_count = 0
-
-        for claim in extracted_claims:
+        def verify_single_claim(claim: Dict[str, Any]) -> ClaimItem:
             claim_id = claim["claim_id"]
             claim_text = claim["text"]
             start_char = claim["start_char"]
@@ -75,8 +70,8 @@ class AuditEngine:
                         evidence_matches=evidence_matches,
                         api_key=api_key
                     )
-                except Exception as e:
-                    # Seamless Fallback to Deterministic Verifier on API error
+                except Exception:
+                    # Seamless Fallback to Deterministic Verifier on API error or timeout
                     verdict, confidence, explanation = DeterministicVerifier.verify_claim(
                         claim_text, evidence_matches
                     )
@@ -85,14 +80,6 @@ class AuditEngine:
                 verdict, confidence, explanation = DeterministicVerifier.verify_claim(
                     claim_text, evidence_matches
                 )
-
-            # Update Metrics Counter
-            if verdict == VerdictEnum.SUPPORTED:
-                supported_count += 1
-            elif verdict == VerdictEnum.CONTRADICTED:
-                contradicted_count += 1
-            else:
-                insufficient_count += 1
 
             evidence_items = [
                 EvidenceItem(
@@ -106,7 +93,7 @@ class AuditEngine:
 
             is_internal_contradiction = claim_id in conflicting_claim_ids
 
-            verified_claims.append(ClaimItem(
+            return ClaimItem(
                 claim_id=claim_id,
                 text=claim_text,
                 start_char=start_char,
@@ -120,7 +107,19 @@ class AuditEngine:
                     source_disagreement=False,
                     internal_contradiction=is_internal_contradiction
                 )
-            ))
+            )
+
+        # Parallelize claim verification across threads for fast execution
+        verified_claims: List[ClaimItem] = []
+        if extracted_claims:
+            from concurrent.futures import ThreadPoolExecutor
+            workers = min(10, max(1, len(extracted_claims)))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                verified_claims = list(executor.map(verify_single_claim, extracted_claims))
+
+        supported_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.SUPPORTED)
+        contradicted_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.CONTRADICTED)
+        insufficient_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.INSUFFICIENT_EVIDENCE)
 
         total_claims = len(verified_claims)
         credibility_score = round(

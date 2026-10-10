@@ -28,7 +28,9 @@ export default function InputSection({
     const files = Array.from(e.target.files);
     files.forEach((file) => {
       const reader = new FileReader();
-      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+      const fnLower = file.name.toLowerCase();
+      
+      if (file.type === 'application/pdf' || fnLower.endsWith('.pdf')) {
         reader.readAsDataURL(file);
         reader.onload = () => {
           setDocuments((prev) => [
@@ -37,6 +39,18 @@ export default function InputSection({
               filename: file.name,
               content: reader.result,
               content_type: 'application/pdf'
+            }
+          ]);
+        };
+      } else if (fnLower.endsWith('.docx') || fnLower.endsWith('.doc')) {
+        reader.readAsDataURL(file);
+        reader.onload = () => {
+          setDocuments((prev) => [
+            ...prev,
+            {
+              filename: file.name,
+              content: reader.result,
+              content_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
             }
           ]);
         };
@@ -103,13 +117,13 @@ export default function InputSection({
             <input
               type="file"
               id="file-upload"
-              accept=".pdf,.txt"
+              accept=".pdf,.txt,.docx,.doc"
               multiple
               onChange={handleFileUpload}
               style={{ display: 'none' }}
             />
             <label htmlFor="file-upload" className="btn-secondary" style={{ padding: '4px 10px', fontSize: '0.8rem', cursor: 'pointer' }}>
-              <FileUp size={14} /> Upload PDF/TXT
+              <FileUp size={14} /> Upload PDF/DOCX/TXT
             </label>
           </div>
 
