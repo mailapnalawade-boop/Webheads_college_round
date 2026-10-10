@@ -1,12 +1,11 @@
 import base64
-<<<<<<< HEAD
-import pymupdf as fitz
-=======
-import fitz  # PyMuPDF
+try:
+    import fitz
+except ImportError:
+    import pymupdf as fitz
 import zipfile
 import io
 import xml.etree.ElementTree as ET
->>>>>>> af5005437a29a1c7c6f88044d83790b29af04e38
 from typing import List, Dict, Any
 from app.schemas.audit import DocumentInput
 
