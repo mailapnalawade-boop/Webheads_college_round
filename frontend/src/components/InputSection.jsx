@@ -316,12 +316,11 @@ export default function InputSection({
                   fontSize: '0.82rem'
                 }}
               >
-                <option value="auto">Automatic (Cloud AI if key configured, otherwise Offline)</option>
+                <option value="auto">Automatic (Cloud AI if key configured, with Hybrid Verification)</option>
                 <option value="llm">Strict Online Cloud LLM ({serverConfig?.default_model || 'Gemini 3.8 Flash'})</option>
-                <option value="offline">Strict Offline Deterministic (Rules & BM25)</option>
               </select>
               <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'block', marginTop: '4px' }}>
-                Offline mode runs 100% locally without external API dependencies.
+                Verifies factual claims against uploaded context using semantic cross-referencing.
               </span>
             </div>
 
@@ -379,13 +378,13 @@ export default function InputSection({
         {/* Verification Engine Readiness */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.82rem' }}>
           <span style={{ color: 'var(--text-dim)' }}>Engine:</span>
-          {(serverConfig?.has_gemini_api_key || apiKey) && options.verification_mode !== 'offline' ? (
+          {(serverConfig?.has_gemini_api_key || apiKey) ? (
             <span style={{ color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
               <Sparkles size={14} /> Ready • {serverConfig?.default_model || 'Gemini 3.8 Flash'} Cloud Verification
             </span>
           ) : (
-            <span style={{ color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
-              <Cpu size={14} /> Ready • Offline Deterministic Rule & BM25 Engine
+            <span style={{ color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
+              <Sparkles size={14} /> Ready • Evidence Verification Engine
             </span>
           )}
         </div>

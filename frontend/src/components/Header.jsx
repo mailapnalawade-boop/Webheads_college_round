@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
-import { ShieldCheck, Key, Cpu, Sparkles, Terminal, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { ShieldCheck, Key, Sparkles, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { checkModelAvailability, updateConfig } from '../services/api';
 
 export default function Header({
   serverConfig,
   apiKey,
   setApiKey,
-  devMode,
-  setDevMode,
   onConfigUpdated
 }) {
   const [showKeyModal, setShowKeyModal] = useState(false);
@@ -97,19 +95,8 @@ export default function Header({
             <ShieldCheck size={28} color="#ffffff" />
           </div>
           <div>
-            <h1 style={{ fontSize: '1.4rem', color: '#ffffff', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <h1 style={{ fontSize: '1.4rem', color: '#ffffff', margin: 0 }}>
               Second Opinion
-              <span style={{
-                fontSize: '0.72rem',
-                padding: '2px 8px',
-                borderRadius: '6px',
-                background: 'rgba(99, 102, 241, 0.2)',
-                border: '1px solid rgba(99, 102, 241, 0.4)',
-                color: '#a5b4fc',
-                fontWeight: 600
-              }}>
-                BIT N BUILD CRCE
-              </span>
             </h1>
             <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
               Explainable, Claim-Level AI Answer Auditor & Evidence Verifier
@@ -117,42 +104,27 @@ export default function Header({
           </div>
         </div>
 
-        {/* Engine Status & Developer Toggle */}
+        {/* Header Actions */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
           
-          {/* Readiness Badge */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            padding: '6px 12px',
-            borderRadius: '20px',
-            fontSize: '0.8rem',
-            fontWeight: 600,
-            background: isCloudReady ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
-            border: `1px solid ${isCloudReady ? 'rgba(16, 185, 129, 0.4)' : 'rgba(245, 158, 11, 0.4)'}`,
-            color: isCloudReady ? '#10b981' : '#f59e0b'
-          }}>
-            {isCloudReady ? <Sparkles size={14} /> : <Cpu size={14} />}
-            <span>{isCloudReady ? `${serverConfig?.default_model || 'Gemini 3.8 Flash'} Online` : 'Offline Deterministic Ready'}</span>
-          </div>
-
-          {/* Dev Mode Toggle */}
-          <button
-            onClick={() => setDevMode(!devMode)}
-            className="btn-secondary"
-            style={{
+          {/* Cloud Model Status (only displayed when active) */}
+          {isCloudReady && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
               padding: '6px 12px',
-              fontSize: '0.78rem',
-              background: devMode ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255, 255, 255, 0.05)',
-              borderColor: devMode ? 'rgba(99, 102, 241, 0.5)' : 'var(--border-color)',
-              color: devMode ? '#a5b4fc' : 'var(--text-muted)'
-            }}
-            title="Toggle Developer Diagnostics and Raw Inspection Mode"
-          >
-            <Terminal size={14} />
-            <span>{devMode ? 'Dev Mode ON' : 'Dev Mode'}</span>
-          </button>
+              borderRadius: '20px',
+              fontSize: '0.8rem',
+              fontWeight: 600,
+              background: 'rgba(16, 185, 129, 0.15)',
+              border: '1px solid rgba(16, 185, 129, 0.4)',
+              color: '#10b981'
+            }}>
+              <Sparkles size={14} />
+              <span>{serverConfig?.default_model || 'Gemini 3.8 Flash'} Online</span>
+            </div>
+          )}
 
           {/* API Key Modal Button */}
           <button
@@ -186,7 +158,7 @@ export default function Header({
               Configure Gemini API Key
             </h3>
             <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', marginBottom: '16px', lineHeight: 1.5 }}>
-              Keys are stored securely in memory for this session and never exposed in generated reports. Leave blank to run in 100% Offline Deterministic Mode.
+              Keys are stored securely in memory for this session and never exposed in generated reports.
             </p>
             <input
               type="password"
