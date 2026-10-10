@@ -48,6 +48,7 @@ class SummaryMetrics(BaseModel):
     contradicted_count: int
     insufficient_evidence_count: int
     credibility_score: float = Field(..., ge=0.0, le=100.0)
+    credibility_breakdown: Optional[Dict[str, Any]] = None
     internal_contradictions_detected: int = 0
     sources_analyzed: int = 0
 

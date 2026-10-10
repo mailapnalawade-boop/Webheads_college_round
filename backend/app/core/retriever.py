@@ -4,9 +4,18 @@ from rank_bm25 import BM25Okapi
 
 class PassageRetriever:
     """
-    Hybrid retriever using BM25 and lexical keyword overlap to retrieve relevant passages.
-    Handles single-document edge cases where BM25 IDF can be negative.
+    Hybrid retriever using BM25 and weighted lexical keyword overlap.
+    Retrieves evidence passages with true semantic relevance and prevents artificial score inflation.
     """
+
+    STOP_WORDS = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with",
+        "by", "about", "against", "between", "into", "through", "during", "before",
+        "after", "above", "below", "from", "up", "down", "of", "off", "over", "under",
+        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "should", "would", "could", "ought", "this", "that",
+        "these", "those", "can", "will", "may", "must", "it", "its", "they", "them"
+    }
 
     def __init__(self, passages: List[Dict[str, Any]]):
         self.passages = passages
@@ -15,8 +24,7 @@ class PassageRetriever:
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
-        # Lowercase and split into alphanumeric tokens
-        return re.findall(r'\w+', text.lower())
+        return re.findall(r'\b\w+\b', text.lower())
 
     def retrieve(self, claim_text: str, top_k: int = 3) -> List[Dict[str, Any]]:
         if not self.passages:
@@ -26,13 +34,14 @@ class PassageRetriever:
         if not tokenized_claim:
             return []
 
-        claim_set = set(tokenized_claim)
-        
-        # Calculate BM25 scores if BM25 model exists
+        # Filter out common stop words to focus on meaningful content words
+        meaningful_claim_tokens = [t for t in tokenized_claim if t not in PassageRetriever.STOP_WORDS and len(t) > 1]
+        claim_set = set(meaningful_claim_tokens) if meaningful_claim_tokens else set(tokenized_claim)
+
+        # Get raw BM25 scores
         raw_bm25 = self.bm25.get_scores(tokenized_claim) if self.bm25 else [0.0] * len(self.passages)
-        # Clamp negative BM25 scores to 0.0
         clamped_bm25 = [max(0.0, float(s)) for s in raw_bm25]
-        max_bm25 = max(clamped_bm25) if clamped_bm25 and max(clamped_bm25) > 0 else 1.0
+        max_bm25 = max(clamped_bm25) if clamped_bm25 else 0.0
 
         results = []
 
@@ -40,21 +49,35 @@ class PassageRetriever:
             passage_tokens = self.corpus[idx]
             passage_set = set(passage_tokens)
 
-            # BM25 component normalized (0.0 to 1.0)
-            bm25_normalized = (clamped_bm25[idx] / max_bm25) if max_bm25 > 0 else 0.0
-
-            # Token overlap component (Jaccard / Recall against claim tokens)
+            # Calculate meaningful keyword overlap
             shared_tokens = claim_set.intersection(passage_set)
-            # Filter stop words from overlap ratio calculation for higher precision
-            meaningful_shared = [t for t in shared_tokens if len(t) > 2 and t not in {"the", "and", "was", "for", "with", "that", "this"}]
-            meaningful_claim = [t for t in claim_set if len(t) > 2 and t not in {"the", "and", "was", "for", "with", "that", "this"}]
-            
-            overlap_ratio = len(meaningful_shared) / len(meaningful_claim) if meaningful_claim else (len(shared_tokens) / len(claim_set) if claim_set else 0.0)
+            overlap_ratio = len(shared_tokens) / len(claim_set) if claim_set else 0.0
 
-            # Combined score giving strong weight to keyword overlap
-            combined_score = round(max(bm25_normalized * 0.5 + overlap_ratio * 0.5, overlap_ratio), 4)
+            # Calculate numbers overlap if claim contains numeric values
+            claim_nums = set(re.findall(r'\b\d+(?:\.\d+)?\b', claim_text))
+            passage_nums = set(re.findall(r'\b\d+(?:\.\d+)?\b', passage["text"]))
+            has_num_match = bool(claim_nums and claim_nums.intersection(passage_nums))
 
-            if combined_score > 0.10:
+            # Proper BM25 scaling without artificially inflating 0-relevance documents
+            if max_bm25 > 2.0:
+                bm25_score = min(1.0, clamped_bm25[idx] / 10.0)
+            elif max_bm25 > 0.0:
+                bm25_score = min(1.0, clamped_bm25[idx] / (max_bm25 * 2.0))
+            else:
+                bm25_score = 0.0
+
+            # If no meaningful words overlap, relevance must be 0.0
+            if not shared_tokens:
+                combined_score = 0.0
+            else:
+                combined_score = 0.6 * overlap_ratio + 0.4 * bm25_score
+                if has_num_match:
+                    combined_score = min(1.0, combined_score + 0.15)
+
+            combined_score = round(combined_score, 4)
+
+            # Strict relevance threshold: require combined_score >= 0.15 or at least 2 shared content tokens
+            if (combined_score >= 0.15 or len(shared_tokens) >= 2) and len(shared_tokens) >= 1:
                 results.append({
                     "excerpt": passage["text"],
                     "source_name": passage["source_name"],
@@ -65,4 +88,15 @@ class PassageRetriever:
 
         # Sort by relevance descending
         results.sort(key=lambda x: x["relevance_score"], reverse=True)
-        return results[:top_k]
+
+        # Deduplicate evidence passages with identical or near-identical text content
+        deduped_results = []
+        seen_excerpts = set()
+        for res in results:
+            norm_excerpt = re.sub(r'\s+', ' ', res["excerpt"].strip().lower())
+            if norm_excerpt not in seen_excerpts:
+                seen_excerpts.add(norm_excerpt)
+                deduped_results.append(res)
+
+        return deduped_results[:top_k]
+

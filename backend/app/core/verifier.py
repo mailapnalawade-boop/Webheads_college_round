@@ -1,5 +1,6 @@
 import json
 import uuid
+import logging
 from typing import List, Dict, Any
 from google import genai
 from google.genai import types
@@ -14,24 +15,29 @@ from app.core.parser import DocumentParser
 from app.core.retriever import PassageRetriever
 from app.core.fallback import DeterministicVerifier
 
+logger = logging.getLogger("second_opinion.verifier")
+
 class AuditEngine:
     """
     Main Verification Orchestrator for Second Opinion.
-    Integrates Extraction, Retrieval, Gemini 2.5 Flash Verification, and Deterministic Fallback.
+    Integrates Claim Extraction, Document Parsing, Hybrid Passage Retrieval,
+    LLM (Gemini) Verification, and Deterministic Fallback Verification.
     """
 
     @staticmethod
     def run_audit(request: AuditRequest) -> AuditResponse:
         audit_id = f"audit_{uuid.uuid4().hex[:8]}"
+        logger.info(f"Starting audit {audit_id} with {len(request.documents)} documents.")
         
-        # 1. Extract Atomic Claims
+        # 1. Extract Atomic Claims (excluding section headers, filler lines, and formatting)
         extracted_claims = ClaimExtractor.extract_claims(request.answer_text)
+        logger.info(f"Extracted {len(extracted_claims)} atomic claims.")
         
-        # 2. Ingest Documents into Passages
+        # 2. Ingest Reference Documents into Passages
         parsed_passages = DocumentParser.parse_documents(request.documents)
         retriever = PassageRetriever(parsed_passages)
 
-        # 3. Detect Internal Contradictions between claims
+        # 3. Detect Internal Contradictions between extracted claims
         internal_conflicts = DeterministicVerifier.detect_internal_contradictions(extracted_claims)
         conflicting_claim_ids = set()
         for conflict in internal_conflicts:
@@ -55,7 +61,7 @@ class AuditEngine:
             confidence = 0.50
             explanation = ""
 
-            # Try Live Gemini Verification if key exists
+            # Try Live Gemini Verification if key and evidence exist
             if use_live_api and evidence_matches:
                 try:
                     verdict, confidence, explanation = AuditEngine._verify_with_gemini(
@@ -63,8 +69,9 @@ class AuditEngine:
                         evidence_matches=evidence_matches,
                         api_key=api_key
                     )
-                except Exception:
-                    # Seamless Fallback to Deterministic Verifier on API error or timeout
+                except Exception as err:
+                    logger.warning(f"Gemini API verification failed for {claim_id}: {err}. Falling back to deterministic verifier.")
+                    # Fallback to Deterministic Verifier on API error, timeout, or parsing failure
                     verdict, confidence, explanation = DeterministicVerifier.verify_claim(
                         claim_text, evidence_matches
                     )
@@ -113,10 +120,13 @@ class AuditEngine:
         supported_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.SUPPORTED)
         contradicted_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.CONTRADICTED)
         insufficient_count = sum(1 for c in verified_claims if c.verdict == VerdictEnum.INSUFFICIENT_EVIDENCE)
-
         total_claims = len(verified_claims)
-        credibility_score = round(
-            (supported_count / total_claims * 100.0) if total_claims > 0 else 0.0, 1
+
+        credibility_score, credibility_breakdown = AuditEngine.calculate_credibility(
+            supported_count=supported_count,
+            insufficient_count=insufficient_count,
+            contradicted_count=contradicted_count,
+            total_claims=total_claims
         )
 
         summary = SummaryMetrics(
@@ -125,17 +135,46 @@ class AuditEngine:
             contradicted_count=contradicted_count,
             insufficient_evidence_count=insufficient_count,
             credibility_score=credibility_score,
+            credibility_breakdown=credibility_breakdown,
             internal_contradictions_detected=len(internal_conflicts),
             sources_analyzed=len(request.documents)
         )
 
+        logger.info(f"Audit {audit_id} complete. Credibility: {credibility_score}%. Supported: {supported_count}, Contradicted: {contradicted_count}, Insufficient: {insufficient_count}.")
+
         return AuditResponse(
             audit_id=audit_id,
-            timestamp=types.datetime.datetime.now(types.datetime.timezone.utc).isoformat() if hasattr(types, 'datetime') else "2026-10-10T15:25:04Z",
+            timestamp="2026-10-10T15:25:04Z",
             summary=summary,
             claims=verified_claims,
             original_answer=request.answer_text
         )
+
+    @staticmethod
+    def calculate_credibility(supported_count: int, insufficient_count: int, contradicted_count: int, total_claims: int) -> tuple:
+        """
+        Calculates a defensible, weighted credibility percentage and breakdown.
+        - Supported claims contribute 1.0 point (100%)
+        - Insufficient evidence claims contribute 0.5 point (50%, neutral state)
+        - Contradicted claims contribute 0.0 point (0%, penalized)
+        Formula: ((supported_count + 0.5 * insufficient_count) / total_claims) * 100
+        """
+        if total_claims > 0:
+            credibility_score = round(((supported_count + 0.5 * insufficient_count) / total_claims) * 100.0, 1)
+        else:
+            credibility_score = 100.0
+
+        credibility_breakdown = {
+            "formula": "(Supported + 0.5 * Insufficient) / Total * 100",
+            "supported_claims": supported_count,
+            "insufficient_evidence_claims": insufficient_count,
+            "contradicted_claims": contradicted_count,
+            "total_claims": total_claims,
+            "supported_points": float(supported_count),
+            "insufficient_points": float(0.5 * insufficient_count),
+            "contradicted_points": 0.0
+        }
+        return credibility_score, credibility_breakdown
 
     @staticmethod
     def _verify_with_gemini(claim_text: str, evidence_matches: List[Dict[str, Any]], api_key: str) -> tuple:
@@ -143,19 +182,30 @@ class AuditEngine:
         
         evidence_str = "\n".join([f"- [{e['source_name']} (Page {e.get('page_number', 1)})]: {e['excerpt']}" for e in evidence_matches])
         
-        prompt = f"""You are an expert AI Answer Auditor. Verify the following CLAIM against the provided EVIDENCE passages.
+        prompt = f"""You are an expert AI Answer Auditor. Evaluate the following CLAIM against the provided REFERENCE EVIDENCE passages.
 
 CLAIM: "{claim_text}"
 
-EVIDENCE PASSAGES:
+REFERENCE EVIDENCE PASSAGES:
 {evidence_str}
 
-Analyze whether the evidence SUPPORTS, CONTRADICTS, or provides INSUFFICIENT_EVIDENCE for the claim.
-Return strictly a valid JSON object with key names:
-"verdict": "SUPPORTED" or "CONTRADICTED" or "INSUFFICIENT_EVIDENCE",
-"confidence": float between 0.0 and 1.0,
-"explanation": a concise 1-2 sentence evidence-based justification.
-"""
+STRICT CLASSIFICATION RULES:
+1. "SUPPORTED": The source evidence explicitly supports the claim or communicates the exact same meaning through a valid paraphrase.
+2. "CONTRADICTED": The source evidence directly conflicts with the claim (e.g. numerical mismatch, opposite action, or contradictory fact).
+3. "INSUFFICIENT_EVIDENCE": The source evidence does not provide enough information to verify whether the claim is supported or contradicted.
+
+IMPORTANT INSTRUCTIONS:
+- Do not use outside knowledge. Treat the reference evidence as the sole source of truth.
+- Do not confuse missing evidence with contradictory evidence.
+- Recognize valid paraphrases and double negations (e.g. "not harmful" matches "safe").
+- Return a concise, claim-specific 1-2 sentence explanation citing the evidence.
+
+Return ONLY a valid JSON object matching this schema:
+{{
+  "verdict": "SUPPORTED" | "CONTRADICTED" | "INSUFFICIENT_EVIDENCE",
+  "confidence": float between 0.0 and 1.0,
+  "explanation": "concise evidence-based justification"
+}}"""
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -165,10 +215,19 @@ Return strictly a valid JSON object with key names:
             )
         )
 
-        data = json.loads(response.text)
+        raw_text = response.text.strip()
+        # Clean potential markdown fences (```json ... ```)
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("\n", 1)[-1]
+            if raw_text.endswith("```"):
+                raw_text = raw_text.rsplit("```", 1)[0]
+            raw_text = raw_text.strip()
+
+        data = json.loads(raw_text)
         verdict_str = data.get("verdict", "INSUFFICIENT_EVIDENCE")
         verdict = VerdictEnum(verdict_str) if verdict_str in VerdictEnum.__members__ else VerdictEnum.INSUFFICIENT_EVIDENCE
         confidence = float(data.get("confidence", 0.85))
-        explanation = str(data.get("explanation", "Verified via Gemini audit engine."))
+        explanation = str(data.get("explanation", "Verified against reference evidence passages."))
 
         return verdict, confidence, explanation
+

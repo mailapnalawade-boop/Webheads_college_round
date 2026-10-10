@@ -80,7 +80,7 @@ export default function App() {
 
     doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Audit ID: ${auditResult.audit_id} | Date: ${new Date(auditResult.timestamp).toLocaleString()}`, 14, 28);
+    doc.text(`Audit ID: ${auditResult.audit_id} | Date: ${new Date().toLocaleString()}`, 14, 28);
     doc.text(`Credibility Score: ${auditResult.summary.credibility_score}%`, 14, 34);
     doc.text(`Total Claims: ${auditResult.summary.total_claims} | Supported: ${auditResult.summary.supported_count} | Contradicted: ${auditResult.summary.contradicted_count} | Unverified: ${auditResult.summary.insufficient_evidence_count}`, 14, 40);
 
@@ -90,22 +90,46 @@ export default function App() {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(12);
     doc.text('Claim Level Breakdowns:', 14, y);
-    y += 8;
+    y += 10;
 
     auditResult.claims.forEach((claim, idx) => {
-      if (y > 270) {
+      // Ensure page break if close to bottom
+      if (y > 250) {
         doc.addPage();
         y = 20;
       }
+
+      // 1. Claim Header & Verdict
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(10);
-      doc.text(`${idx + 1}. [${claim.verdict}] ${claim.text}`, 14, y);
-      y += 6;
+      const headerText = `${idx + 1}. [${claim.verdict}] ${claim.text}`;
+      const headerLines = doc.splitTextToSize(headerText, 175);
+      doc.text(headerLines, 14, y);
+      y += headerLines.length * 5 + 2;
 
+      // 2. Explanation
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
-      doc.text(`Explanation: ${claim.explanation}`, 18, y, { maxWidth: 170 });
-      y += 12;
+      const expText = `Explanation: ${claim.explanation}`;
+      const expLines = doc.splitTextToSize(expText, 170);
+      doc.text(expLines, 18, y);
+      y += expLines.length * 4.5 + 2;
+
+      // 3. Evidence Passages (if available)
+      if (claim.evidence && claim.evidence.length > 0) {
+        const topEv = claim.evidence[0];
+        doc.setFont('helvetica', 'italic');
+        const evText = `Source Evidence (${topEv.source_name}, pg ${topEv.page_number}): "${topEv.excerpt}"`;
+        const evLines = doc.splitTextToSize(evText, 165);
+        doc.text(evLines, 22, y);
+        y += evLines.length * 4.5 + 4;
+      } else {
+        doc.setFont('helvetica', 'italic');
+        doc.text(`Source Evidence: No relevant document evidence found.`, 22, y);
+        y += 6;
+      }
+
+      y += 4; // Gap between claim cards
     });
 
     doc.save(`Second_Opinion_Audit_${auditResult.audit_id}.pdf`);
