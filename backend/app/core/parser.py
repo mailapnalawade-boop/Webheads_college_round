@@ -1,5 +1,8 @@
 import base64
-import fitz  # PyMuPDF
+try:
+    import fitz
+except ImportError:
+    import pymupdf as fitz
 import zipfile
 import io
 import xml.etree.ElementTree as ET

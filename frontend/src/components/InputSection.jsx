@@ -16,7 +16,7 @@ export default function InputSection({
   const [showDocAdd, setShowDocAdd] = useState(false);
 
   const handleAddTextDoc = () => {
-    if (!docText.strip || !docText.trim()) return;
+    if (!docText.trim()) return;
     const name = docName.trim() || `Reference_Doc_${documents.length + 1}.txt`;
     setDocuments([...documents, { filename: name, content: docText, content_type: 'text/plain' }]);
     setDocName('');

@@ -1,6 +1,10 @@
 import json
 import uuid
+<<<<<<< HEAD
 import logging
+=======
+from datetime import datetime, timezone
+>>>>>>> b1d794a37d90f90316b91e1cfc06291cfbeda096
 from typing import List, Dict, Any
 from google import genai
 from google.genai import types
@@ -56,6 +60,12 @@ class AuditEngine:
 
             # Retrieve top matching passages
             evidence_matches = retriever.retrieve(claim_text, top_k=request.options.top_k_passages)
+
+            # If web search is enabled and document evidence is insufficient or absent
+            if request.options.enable_web_search and (not evidence_matches or evidence_matches[0]["relevance_score"] < 0.35):
+                web_matches = PassageRetriever.search_web(claim_text, max_results=2)
+                if web_matches:
+                    evidence_matches = (evidence_matches or []) + web_matches
 
             verdict = VerdictEnum.INSUFFICIENT_EVIDENCE
             confidence = 0.50
@@ -144,7 +154,11 @@ class AuditEngine:
 
         return AuditResponse(
             audit_id=audit_id,
+<<<<<<< HEAD
             timestamp="2026-10-10T15:25:04Z",
+=======
+            timestamp=datetime.now(timezone.utc).isoformat(),
+>>>>>>> b1d794a37d90f90316b91e1cfc06291cfbeda096
             summary=summary,
             claims=verified_claims,
             original_answer=request.answer_text
