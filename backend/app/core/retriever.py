@@ -86,9 +86,8 @@ class PassageRetriever:
                     "match_type": "bm25_passage"
                 })
 
-        # Sort by relevance descending
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
-<<<<<<< HEAD
+        # Sort by relevance descending with deterministic tie-breaker
+        results.sort(key=lambda x: (x["relevance_score"], x["source_name"], x.get("page_number", 1)), reverse=True)
 
         # Deduplicate evidence passages with identical or near-identical text content
         deduped_results = []
@@ -100,8 +99,6 @@ class PassageRetriever:
                 deduped_results.append(res)
 
         return deduped_results[:top_k]
-=======
-        return results[:top_k]
 
     @staticmethod
     def search_web(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
@@ -127,5 +124,4 @@ class PassageRetriever:
             return results
         except Exception:
             return []
->>>>>>> b1d794a37d90f90316b91e1cfc06291cfbeda096
 

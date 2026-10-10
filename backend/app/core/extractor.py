@@ -79,6 +79,13 @@ class ClaimExtractor:
             offset_start = start_char + sub_pos if sub_pos != -1 else start_char
             offset_end = offset_start + len(cleaned_text)
 
+            # Ensure exact character match against source text
+            if text[offset_start:offset_end] != cleaned_text:
+                found = text.find(cleaned_text, start_char)
+                if found != -1:
+                    offset_start = found
+                    offset_end = found + len(cleaned_text)
+
             # Avoid duplicate claims
             norm_key = cleaned_lower
             if norm_key in seen_texts:
@@ -94,5 +101,104 @@ class ClaimExtractor:
             claim_index += 1
 
         return claims
+
+    @staticmethod
+    def extract_claims_with_llm(
+        text: str,
+        api_key: str,
+        model_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Uses Gemini with temperature=0.0 to decompose answer into atomic factual assertions,
+        mapping each extracted claim back to exact character spans in the original text.
+        """
+        if not text or not text.strip():
+            return []
+
+        import json
+        from google import genai
+        from google.genai import types
+        from app.config import settings
+
+        resolved_model = model_name or settings.DEFAULT_MODEL
+        client = genai.Client(api_key=(api_key or "").strip().strip('"').strip("'"))
+        prompt = f"""You are a precise factual claim extraction auditor. Decompose the following text into atomic, individually verifiable factual statements.
+
+RULES:
+1. Extract distinct factual assertions that can be proved or disproved against reference documents.
+2. Each extracted claim MUST be verbatim or an exact atomic sentence/clause from the input text.
+3. Exclude greetings, conversational filler, markdown headers, and pure questions.
+4. Keep the exact wording from the text so it can be located by character offset.
+
+TEXT TO AUDIT:
+\"\"\"{text}\"\"\"
+
+Return ONLY valid JSON matching:
+{{
+  "claims": [
+    "exact atomic sentence or clause from the answer"
+  ]
+}}"""
+
+        response = client.models.generate_content(
+            model=resolved_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json"
+            )
+        )
+        raw_text = response.text.strip()
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("\n", 1)[-1]
+            if raw_text.endswith("```"):
+                raw_text = raw_text.rsplit("```", 1)[0]
+            raw_text = raw_text.strip()
+
+        data = json.loads(raw_text)
+        extracted_strings = data.get("claims", [])
+
+        claims = []
+        claim_index = 1
+        seen_texts = set()
+        cursor = 0
+
+        for raw_c in extracted_strings:
+            c_text = str(raw_c).strip()
+            if not c_text or len(c_text) < 6:
+                continue
+
+            norm_key = c_text.lower()
+            if norm_key in seen_texts:
+                continue
+
+            # Find exact character position in original text
+            pos = text.find(c_text, cursor)
+            if pos == -1:
+                pos = text.find(c_text)
+
+            if pos != -1:
+                start_char = pos
+                end_char = pos + len(c_text)
+                cursor = max(cursor, end_char)
+            else:
+                continue
+
+            seen_texts.add(norm_key)
+            claims.append({
+                "claim_id": f"claim_{claim_index}",
+                "text": c_text,
+                "start_char": start_char,
+                "end_char": end_char
+            })
+            claim_index += 1
+
+        if claims:
+            claims.sort(key=lambda x: (x["start_char"], x["claim_id"]))
+            for idx, c in enumerate(claims):
+                c["claim_id"] = f"claim_{idx + 1}"
+            return claims
+
+        return ClaimExtractor.extract_claims(text)
 
 
