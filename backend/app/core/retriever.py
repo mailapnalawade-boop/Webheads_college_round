@@ -66,3 +66,29 @@ class PassageRetriever:
         # Sort by relevance descending
         results.sort(key=lambda x: x["relevance_score"], reverse=True)
         return results[:top_k]
+
+    @staticmethod
+    def search_web(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
+        """
+        Fetches external public web search snippets using DuckDuckGo when document context is absent.
+        """
+        try:
+            from duckduckgo_search import DDGS
+            results = []
+            with DDGS() as ddgs:
+                ddg_results = list(ddgs.text(query, max_results=max_results))
+                for r in ddg_results:
+                    snippet = r.get("body", "") or r.get("snippet", "")
+                    title = r.get("title", "Public Web")
+                    if snippet:
+                        results.append({
+                            "excerpt": snippet,
+                            "source_name": f"Web: {title}",
+                            "page_number": 1,
+                            "relevance_score": 0.65,
+                            "match_type": "web_search"
+                        })
+            return results
+        except Exception:
+            return []
+

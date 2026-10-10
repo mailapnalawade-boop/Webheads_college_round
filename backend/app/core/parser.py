@@ -1,5 +1,5 @@
 import base64
-import fitz  # PyMuPDF
+import pymupdf as fitz
 from typing import List, Dict, Any
 from app.schemas.audit import DocumentInput
 

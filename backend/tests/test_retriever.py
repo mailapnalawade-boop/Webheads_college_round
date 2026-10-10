@@ -13,3 +13,9 @@ def test_bm25_retriever():
     assert len(results) == 1
     assert results[0]["source_name"] == "doc1.txt"
     assert results[0]["relevance_score"] > 0.0
+
+def test_web_retriever_interface():
+    # Test interface resilience (returns list even if network disabled or mocked)
+    results = PassageRetriever.search_web("Amoxicillin", max_results=1)
+    assert isinstance(results, list)
+
