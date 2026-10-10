@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileUp, Search, Play, FileText, Trash2, Sliders, AlertCircle } from 'lucide-react';
+import { FileUp, Search, Play, FileText, Trash2, Sliders } from 'lucide-react';
 
 export default function InputSection({
   answerText,

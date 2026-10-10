@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import jsPDF from 'jspdf';
+import React, { useState } from 'react';
 import Header from './components/Header';
 import InputSection from './components/InputSection';
-import SummaryDashboard from './components/SummaryDashboard';
+import AuditOverview from './components/AuditOverview';
 import ClaimHighlighter from './components/ClaimHighlighter';
-import ClaimCard from './components/ClaimCard';
-import { runAudit, getSampleData, getHealth } from './services/api';
+import IssuesAttentionSection from './components/IssuesAttentionSection';
+import SupportedClaimsSection from './components/SupportedClaimsSection';
+import { exportAuditPdf } from './utils/pdfGenerator';
+import { runAudit, getSampleData } from './services/api';
 import { AlertCircle } from 'lucide-react';
 
 export default function App() {
@@ -24,7 +25,7 @@ export default function App() {
   const [activeFilter, setActiveFilter] = useState('ALL');
   const [selectedClaimId, setSelectedClaimId] = useState(null);
 
-  // Load sample dataset
+  // Load sample benchmark dataset
   const handleLoadSample = async () => {
     try {
       const samples = await getSampleData();
@@ -33,6 +34,7 @@ export default function App() {
       setDocuments(medical.documents);
       setErrorMsg('');
     } catch (err) {
+      console.error(err);
       setErrorMsg('Failed to fetch sample benchmark data.');
     }
   };
@@ -53,6 +55,8 @@ export default function App() {
 
       const result = await runAudit(payload);
       setAuditResult(result);
+      setActiveFilter('ALL');
+      setSelectedClaimId(null);
     } catch (err) {
       const detail = err.response?.data?.detail;
       let msg = 'Audit execution failed. Ensure backend server is running on port 8000.';
@@ -72,72 +76,30 @@ export default function App() {
   // Export PDF Report
   const handleExportPdf = () => {
     if (!auditResult) return;
-
-    const doc = new jsPDF();
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(18);
-    doc.text('Second Opinion — AI Answer Audit Report', 14, 20);
-
-    doc.setFontSize(10);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Audit ID: ${auditResult.audit_id} | Date: ${new Date().toLocaleString()}`, 14, 28);
-    doc.text(`Credibility Score: ${auditResult.summary.credibility_score}%`, 14, 34);
-    doc.text(`Total Claims: ${auditResult.summary.total_claims} | Supported: ${auditResult.summary.supported_count} | Contradicted: ${auditResult.summary.contradicted_count} | Unverified: ${auditResult.summary.insufficient_evidence_count}`, 14, 40);
-
-    doc.line(14, 44, 196, 44);
-
-    let y = 52;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.text('Claim Level Breakdowns:', 14, y);
-    y += 10;
-
-    auditResult.claims.forEach((claim, idx) => {
-      // Ensure page break if close to bottom
-      if (y > 250) {
-        doc.addPage();
-        y = 20;
-      }
-
-      // 1. Claim Header & Verdict
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10);
-      const headerText = `${idx + 1}. [${claim.verdict}] ${claim.text}`;
-      const headerLines = doc.splitTextToSize(headerText, 175);
-      doc.text(headerLines, 14, y);
-      y += headerLines.length * 5 + 2;
-
-      // 2. Explanation
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9);
-      const expText = `Explanation: ${claim.explanation}`;
-      const expLines = doc.splitTextToSize(expText, 170);
-      doc.text(expLines, 18, y);
-      y += expLines.length * 4.5 + 2;
-
-      // 3. Evidence Passages (if available)
-      if (claim.evidence && claim.evidence.length > 0) {
-        const topEv = claim.evidence[0];
-        doc.setFont('helvetica', 'italic');
-        const evText = `Source Evidence (${topEv.source_name}, pg ${topEv.page_number}): "${topEv.excerpt}"`;
-        const evLines = doc.splitTextToSize(evText, 165);
-        doc.text(evLines, 22, y);
-        y += evLines.length * 4.5 + 4;
-      } else {
-        doc.setFont('helvetica', 'italic');
-        doc.text(`Source Evidence: No relevant document evidence found.`, 22, y);
-        y += 6;
-      }
-
-      y += 4; // Gap between claim cards
-    });
-
-    doc.save(`Second_Opinion_Audit_${auditResult.audit_id}.pdf`);
+    exportAuditPdf(auditResult, documents);
   };
 
-  const filteredClaims = auditResult
-    ? auditResult.claims.filter((c) => activeFilter === 'ALL' || c.verdict === activeFilter)
-    : [];
+  // Selection handler with auto-scroll
+  const handleSelectClaim = (claimId) => {
+    setSelectedClaimId(claimId);
+    setTimeout(() => {
+      const elem = document.getElementById(claimId);
+      if (elem) {
+        elem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }, 50);
+  };
+
+  const getFilteredIssuesClaims = () => {
+    if (!auditResult) return [];
+    if (activeFilter === 'CONTRADICTED') {
+      return auditResult.claims.filter((c) => c.verdict === 'CONTRADICTED');
+    }
+    if (activeFilter === 'INSUFFICIENT_EVIDENCE') {
+      return auditResult.claims.filter((c) => c.verdict === 'INSUFFICIENT_EVIDENCE');
+    }
+    return auditResult.claims;
+  };
 
   return (
     <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '24px 16px' }}>
@@ -183,10 +145,13 @@ export default function App() {
 
       {/* Audit Results Dashboard & Claims */}
       {auditResult && (
-        <div>
-          {/* Summary Overview */}
-          <SummaryDashboard
+        <div style={{ marginTop: '24px' }}>
+          
+          {/* 1. Redesigned Audit Overview */}
+          <AuditOverview
             summary={auditResult.summary}
+            documents={documents}
+            claims={auditResult.claims}
             activeFilter={activeFilter}
             setActiveFilter={setActiveFilter}
             onExportPdf={handleExportPdf}
@@ -197,24 +162,27 @@ export default function App() {
             claims={auditResult.claims}
             originalText={auditResult.original_answer}
             selectedClaimId={selectedClaimId}
-            setSelectedClaimId={setSelectedClaimId}
+            setSelectedClaimId={handleSelectClaim}
           />
 
-          {/* Claims List */}
-          <div style={{ marginTop: '24px' }}>
-            <h3 style={{ fontSize: '1.1rem', color: '#ffffff', marginBottom: '16px' }}>
-              Claim Evidence & Verification Breakdowns ({filteredClaims.length})
-            </h3>
+          {/* 2. Prioritized Issues That Need Attention (Contradicted & Unverified first) */}
+          {(activeFilter === 'ALL' || activeFilter === 'ISSUES' || activeFilter === 'CONTRADICTED' || activeFilter === 'INSUFFICIENT_EVIDENCE') && (
+            <IssuesAttentionSection
+              claims={getFilteredIssuesClaims()}
+              selectedClaimId={selectedClaimId}
+              setSelectedClaimId={handleSelectClaim}
+            />
+          )}
 
-            {filteredClaims.map((claim) => (
-              <ClaimCard
-                key={claim.claim_id}
-                claim={claim}
-                isSelected={selectedClaimId === claim.claim_id}
-                onSelect={() => setSelectedClaimId(claim.claim_id)}
-              />
-            ))}
-          </div>
+          {/* 3. Grouped Supported Claims (Collapsible, collapsed by default) */}
+          {(activeFilter === 'ALL' || activeFilter === 'SUPPORTED') && (
+            <SupportedClaimsSection
+              claims={auditResult.claims}
+              selectedClaimId={selectedClaimId}
+              setSelectedClaimId={handleSelectClaim}
+            />
+          )}
+
         </div>
       )}
     </div>

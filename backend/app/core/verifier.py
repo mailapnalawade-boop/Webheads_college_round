@@ -1,10 +1,7 @@
 import json
 import uuid
-<<<<<<< HEAD
 import logging
-=======
 from datetime import datetime, timezone
->>>>>>> b1d794a37d90f90316b91e1cfc06291cfbeda096
 from typing import List, Dict, Any
 from google import genai
 from google.genai import types
@@ -154,11 +151,7 @@ class AuditEngine:
 
         return AuditResponse(
             audit_id=audit_id,
-<<<<<<< HEAD
-            timestamp="2026-10-10T15:25:04Z",
-=======
             timestamp=datetime.now(timezone.utc).isoformat(),
->>>>>>> b1d794a37d90f90316b91e1cfc06291cfbeda096
             summary=summary,
             claims=verified_claims,
             original_answer=request.answer_text
