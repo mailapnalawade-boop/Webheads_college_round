@@ -2,8 +2,8 @@
 
 :root {
   --bg-dark: #090d16;
-  --bg-card: rgba(18, 26, 43, 0.7);
-  --bg-card-hover: rgba(26, 37, 60, 0.85);
+  --bg-card: rgba(18, 26, 43, 0.75);
+  --bg-card-hover: rgba(26, 37, 60, 0.9);
   --border-color: rgba(255, 255, 255, 0.08);
   --border-focus: rgba(99, 102, 241, 0.5);
 
@@ -16,15 +16,24 @@
 
   --status-supported: #10b981;
   --status-supported-bg: rgba(16, 185, 129, 0.12);
-  --status-supported-border: rgba(16, 185, 129, 0.3);
+  --status-supported-border: rgba(16, 185, 129, 0.35);
 
   --status-contradicted: #f43f5e;
   --status-contradicted-bg: rgba(244, 63, 94, 0.12);
-  --status-contradicted-border: rgba(244, 63, 94, 0.3);
+  --status-contradicted-border: rgba(244, 63, 94, 0.35);
 
   --status-insufficient: #f59e0b;
   --status-insufficient-bg: rgba(245, 158, 11, 0.12);
-  --status-insufficient-border: rgba(245, 158, 11, 0.3);
+  --status-insufficient-border: rgba(245, 158, 11, 0.35);
+
+  --status-inconsistent: #a855f7;
+  --status-inconsistent-bg: rgba(168, 85, 247, 0.12);
+  --status-inconsistent-border: rgba(168, 85, 247, 0.35);
+
+  --severity-critical: #ef4444;
+  --severity-high: #f97316;
+  --severity-moderate: #f59e0b;
+  --severity-low: #3b82f6;
 }
 
 * {
@@ -37,8 +46,8 @@ body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   background-color: var(--bg-dark);
   background-image: 
-    radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.08) 0px, transparent 50%),
-    radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.05) 0px, transparent 50%);
+    radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.10) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.06) 0px, transparent 50%);
   color: var(--text-main);
   min-height: 100vh;
   line-height: 1.5;
@@ -53,7 +62,7 @@ body {
   border: 1px solid var(--border-color);
   border-radius: 16px;
   box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .glass-panel:hover {
@@ -116,6 +125,35 @@ h1, h2, h3, h4 {
 .btn-secondary:hover {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Scroll margin so scrolled cards don't collide with top screen */
+.claim-card-target {
+  scroll-margin-top: 100px;
+}
+
+.highlight-span-target {
+  scroll-margin-top: 140px;
+}
+
+/* Animations */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes pulseHighlight {
+  0% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.7); }
+  70% { box-shadow: 0 0 0 10px rgba(99, 102, 241, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0); }
+}
+
+.card-selected-pulse {
+  animation: pulseHighlight 1.5s ease-out;
 }
 
 /* Custom Scrollbar */

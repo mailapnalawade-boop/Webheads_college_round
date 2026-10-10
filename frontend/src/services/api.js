@@ -24,3 +24,19 @@ export const getHealth = async () => {
   const response = await apiClient.get('/health');
   return response.data;
 };
+
+export const getConfig = async () => {
+  const response = await apiClient.get('/config');
+  return response.data;
+};
+
+export const updateConfig = async (config) => {
+  const response = await apiClient.post('/config', config);
+  return response.data;
+};
+
+export const checkModelAvailability = async (apiKey) => {
+  const response = await apiClient.post('/model-check', { api_key: apiKey });
+  return response.data;
+};
+
