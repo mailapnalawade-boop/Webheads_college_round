@@ -1,22 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Header from './components/Header';
 import InputSection from './components/InputSection';
 import AuditOverview from './components/AuditOverview';
 import ClaimHighlighter from './components/ClaimHighlighter';
-<<<<<<< HEAD
 import IssuesAttentionSection from './components/IssuesAttentionSection';
 import SupportedClaimsSection from './components/SupportedClaimsSection';
-import { exportAuditPdf } from './utils/pdfGenerator';
-import { runAudit, getSampleData } from './services/api';
-import { AlertCircle } from 'lucide-react';
-=======
-import ClaimCard from './components/ClaimCard';
 import LogicalInconsistenciesSection from './components/LogicalInconsistenciesSection';
 import SafetyRecommendationsSection from './components/SafetyRecommendationsSection';
 import AuditLoadingOverlay from './components/AuditLoadingOverlay';
 import DeveloperDiagnostics from './components/DeveloperDiagnostics';
+import { exportAuditPdf } from './utils/pdfGenerator';
 import { runAudit, getSampleData, getConfig } from './services/api';
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
 
 export default function App() {
   const [apiKey, setApiKey] = useState('');
@@ -45,19 +39,6 @@ export default function App() {
       .catch(() => setServerConfig({ has_gemini_api_key: false, active_mode: 'offline_deterministic' }));
   }, []);
 
-<<<<<<< HEAD
-  // Load sample benchmark dataset
-  const handleLoadSample = async () => {
-    try {
-      const samples = await getSampleData();
-      const medical = samples.medical_case;
-      setAnswerText(medical.answer_text);
-      setDocuments(medical.documents);
-      setErrorMsg('');
-    } catch (err) {
-      console.error(err);
-      setErrorMsg('Failed to fetch sample benchmark data.');
-=======
   // Load sample dataset
   const handleLoadSample = async (sampleKey = 'medical_case') => {
     try {
@@ -68,9 +49,9 @@ export default function App() {
         setDocuments(chosen.documents);
         setErrorMsg('');
       }
-    } catch {
+    } catch (err) {
+      console.error(err);
       setErrorMsg('Failed to fetch benchmark sample dataset from server.');
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
     }
   };
 
@@ -91,10 +72,7 @@ export default function App() {
 
       const result = await runAudit(payload);
       setAuditResult(result);
-<<<<<<< HEAD
       setActiveFilter('ALL');
-=======
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
       setSelectedClaimId(null);
     } catch (err) {
       const detail = err.response?.data?.detail;
@@ -131,6 +109,7 @@ export default function App() {
       };
       const result = await runAudit(payload);
       setAuditResult(result);
+      setActiveFilter('ALL');
       setSelectedClaimId(null);
     } catch (err) {
       setErrorMsg(err.response?.data?.detail || err.message || 'Offline audit execution failed.');
@@ -146,6 +125,17 @@ export default function App() {
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
+  };
+
+  // Selection handler with auto-scroll
+  const handleSelectClaim = (claimId) => {
+    setSelectedClaimId(claimId);
+    setTimeout(() => {
+      const elem = document.getElementById(claimId);
+      if (elem) {
+        elem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }, 50);
   };
 
   // Export Markdown Report
@@ -169,8 +159,8 @@ export default function App() {
       `| **Supported Claims** | ${summary.supported_count} |`,
       `| **Contradicted / Incorrect Claims** | ${summary.contradicted_count} |`,
       `| **Insufficient Evidence Claims** | ${summary.insufficient_evidence_count} |`,
-      `| **Logical Inconsistencies** | ${summary.logical_inconsistency_count} |`,
-      `| **Potentially Unsafe Recommendations** | ${summary.unsafe_recommendations_count} |`,
+      `| **Logical Inconsistencies** | ${summary.logical_inconsistency_count || summary.internal_contradictions_detected || 0} |`,
+      `| **Potentially Unsafe Recommendations** | ${summary.unsafe_recommendations_count || 0} |`,
       ``,
       `---`,
       `## 2. Original AI Answer`,
@@ -216,7 +206,7 @@ export default function App() {
       lines.push(`### Claim ${idx + 1}: [${claim.verdict}]`);
       lines.push(`> "${claim.text}"`);
       lines.push(`- **Primary Status:** ${claim.verdict}`);
-      lines.push(`- **Model Certainty:** ${Math.round(claim.confidence * 100)}% (${claim.uncertainty_level} Uncertainty)`);
+      lines.push(`- **Model Certainty:** ${Math.round(claim.confidence * 100)}%`);
       lines.push(`- **Explanation:** ${claim.explanation}`);
 
       if (claim.contradicting_evidence?.length > 0) {
@@ -237,7 +227,7 @@ export default function App() {
 
     lines.push(`---`);
     lines.push(`## 6. Audit Limitations`);
-    lines.push(`*${auditResult.limitations}*`);
+    lines.push(`*${auditResult.limitations || 'Automated audit evaluated strictly against supplied reference documents.'}*`);
 
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -263,73 +253,7 @@ export default function App() {
   // Export PDF Report
   const handleExportPdf = () => {
     if (!auditResult) return;
-<<<<<<< HEAD
     exportAuditPdf(auditResult, documents);
-=======
-
-    const doc = new jsPDF();
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(16);
-    doc.text('Second Opinion — AI Answer Audit Report', 14, 20);
-
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Audit ID: ${auditResult.audit_id} | Date: ${new Date().toLocaleString()}`, 14, 28);
-    doc.text(`Mode: ${auditResult.verification_mode} | Credibility Score: ${auditResult.summary.credibility_score}%`, 14, 34);
-    doc.text(`Claims: ${auditResult.summary.total_claims} | Supported: ${auditResult.summary.supported_count} | Contradicted: ${auditResult.summary.contradicted_count} | Unverified: ${auditResult.summary.insufficient_evidence_count} | Logic Conflicts: ${auditResult.summary.logical_inconsistency_count}`, 14, 40);
-
-    doc.line(14, 44, 196, 44);
-
-    let y = 52;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
-    doc.text('Claim-by-Claim Verification Analysis:', 14, y);
-    y += 8;
-
-    auditResult.claims.forEach((claim, idx) => {
-      if (y > 255) {
-        doc.addPage();
-        y = 20;
-      }
-
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      const headerText = `${idx + 1}. [${claim.verdict}] "${claim.text}"`;
-      const headerLines = doc.splitTextToSize(headerText, 175);
-      doc.text(headerLines, 14, y);
-      y += headerLines.length * 4.5 + 2;
-
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8.5);
-      const expText = `Explanation: ${claim.explanation}`;
-      const expLines = doc.splitTextToSize(expText, 170);
-      doc.text(expLines, 18, y);
-      y += expLines.length * 4 + 2;
-
-      const topEv = claim.contradicting_evidence?.[0] || claim.supporting_evidence?.[0] || claim.evidence?.[0];
-      if (topEv) {
-        doc.setFont('helvetica', 'italic');
-        const evText = `Reference Evidence (${topEv.source_name}, pg ${topEv.page_number || 1}): "${topEv.excerpt}"`;
-        const evLines = doc.splitTextToSize(evText, 165);
-        doc.text(evLines, 22, y);
-        y += evLines.length * 4 + 3;
-      }
-      y += 3;
-    });
-
-    doc.save(`Second_Opinion_Audit_${auditResult.audit_id}.pdf`);
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
-  };
-
-  // Selection handler with auto-scroll
-  const handleSelectClaim = (claimId) => {
-    setSelectedClaimId(claimId);
-    setTimeout(() => {
-      const elem = document.getElementById(claimId);
-      if (elem) {
-        elem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      }
-    }, 50);
   };
 
   const getFilteredIssuesClaims = () => {
@@ -382,16 +306,10 @@ export default function App() {
 
       {/* Audit Results Dashboard */}
       {auditResult && (
-<<<<<<< HEAD
         <div style={{ marginTop: '24px' }}>
           
           {/* 1. Redesigned Audit Overview */}
           <AuditOverview
-=======
-        <div>
-          {/* Summary Dashboard */}
-          <SummaryDashboard
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
             summary={auditResult.summary}
             documents={documents}
             claims={auditResult.claims}
@@ -409,9 +327,29 @@ export default function App() {
             claims={auditResult.claims}
             originalText={auditResult.original_answer}
             selectedClaimId={selectedClaimId}
-<<<<<<< HEAD
             setSelectedClaimId={handleSelectClaim}
+            onSelectClaim={handleJumpToAnswer}
           />
+
+          {/* Logical Inconsistencies Section (if any detected) */}
+          {auditResult.logical_inconsistencies && auditResult.logical_inconsistencies.length > 0 && (
+            <LogicalInconsistenciesSection
+              logicalInconsistencies={auditResult.logical_inconsistencies}
+              onSelectClaim={(id) => handleJumpToAnswer(id)}
+            />
+          )}
+
+          {/* Potentially Unsafe Recommendations Section */}
+          {auditResult.safety_analysis && auditResult.safety_analysis.recommendations?.length > 0 && (
+            <SafetyRecommendationsSection
+              safetyAnalysis={auditResult.safety_analysis}
+            />
+          )}
+
+          {/* Developer Diagnostics (when Dev Mode is ON) */}
+          {devMode && (
+            <DeveloperDiagnostics auditResult={auditResult} />
+          )}
 
           {/* 2. Prioritized Issues That Need Attention (Contradicted & Unverified first) */}
           {(activeFilter === 'ALL' || activeFilter === 'ISSUES' || activeFilter === 'CONTRADICTED' || activeFilter === 'INSUFFICIENT_EVIDENCE') && (
@@ -431,55 +369,6 @@ export default function App() {
             />
           )}
 
-=======
-            onSelectClaim={(id) => setSelectedClaimId(id)}
-          />
-
-          {/* Logical Inconsistencies Section (if any detected) */}
-          <LogicalInconsistenciesSection
-            logicalInconsistencies={auditResult.logical_inconsistencies}
-            onSelectClaim={(id) => handleJumpToAnswer(id)}
-          />
-
-          {/* Potentially Unsafe Recommendations Section */}
-          <SafetyRecommendationsSection
-            safetyAnalysis={auditResult.safety_analysis}
-          />
-
-          {/* Developer Diagnostics (when Dev Mode is ON) */}
-          {devMode && (
-            <DeveloperDiagnostics auditResult={auditResult} />
-          )}
-
-          {/* Claim-by-Claim Verification Breakdowns */}
-          <div style={{ marginTop: '28px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h3 style={{ fontSize: '1.15rem', color: '#ffffff', margin: 0 }}>
-                Claim-Level Evidence Breakdowns ({filteredClaims.length} of {auditResult.claims.length})
-              </h3>
-              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                Filter: <strong style={{ color: '#a5b4fc' }}>{activeFilter.replace(/_/g, ' ')}</strong>
-              </span>
-            </div>
-
-            {filteredClaims.length === 0 ? (
-              <div className="glass-panel" style={{ padding: '32px', textAlign: 'center', color: 'var(--text-dim)' }}>
-                No claims match the filter "{activeFilter.replace(/_/g, ' ')}".
-              </div>
-            ) : (
-              filteredClaims.map((claim, idx) => (
-                <ClaimCard
-                  key={claim.claim_id}
-                  claim={claim}
-                  index={idx}
-                  isSelected={selectedClaimId === claim.claim_id}
-                  onSelect={() => setSelectedClaimId(claim.claim_id)}
-                  onJumpToAnswer={handleJumpToAnswer}
-                />
-              ))
-            )}
-          </div>
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
         </div>
       )}
     </div>

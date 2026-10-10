@@ -1,12 +1,8 @@
 import React, { useState } from 'react';
-<<<<<<< HEAD
-import { FileUp, Search, Play, FileText, Trash2, Sliders } from 'lucide-react';
-=======
 import {
   FileUp, Play, FileText, Trash2, Sliders, ChevronDown, ChevronUp,
   Sparkles, Cpu, Plus
 } from 'lucide-react';
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
 
 export default function InputSection({
   answerText,

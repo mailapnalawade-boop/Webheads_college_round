@@ -86,14 +86,8 @@ class PassageRetriever:
                     "match_type": "bm25_passage"
                 })
 
-<<<<<<< HEAD
-        # Sort by relevance descending
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
-=======
         # Sort by relevance descending with deterministic tie-breaker
         results.sort(key=lambda x: (x["relevance_score"], x["source_name"], x.get("page_number", 1)), reverse=True)
-
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
         # Deduplicate evidence passages with identical or near-identical text content
         deduped_results = []
         seen_excerpts = set()

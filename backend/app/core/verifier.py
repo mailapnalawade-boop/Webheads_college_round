@@ -1,16 +1,10 @@
 import json
 import uuid
-<<<<<<< HEAD
-import logging
-from datetime import datetime, timezone
-from typing import List, Dict, Any
-=======
 import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple, Optional
 from fastapi import HTTPException, status
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
 from google import genai
 from google.genai import types
 
@@ -410,14 +404,11 @@ class AuditEngine:
         response = AuditResponse(
             audit_id=audit_id,
             timestamp=datetime.now(timezone.utc).isoformat(),
-<<<<<<< HEAD
-=======
             verification_mode=active_mode,
             model_info=model_name,
             cached=False,
             audit_configuration=audit_config,
             limitations="Automated audit evaluated strictly against supplied reference documents. Self-reported confidence reflects internal certainty, not calibrated statistical probability of ground truth.",
->>>>>>> ec6e633c716b8e29e61a630b74e1116960f129a3
             summary=summary,
             claims=verified_claims,
             logical_inconsistencies=logical_inconsistencies,
