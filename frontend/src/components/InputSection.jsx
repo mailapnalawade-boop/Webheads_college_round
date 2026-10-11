@@ -13,9 +13,7 @@ export default function InputSection({
   setOptions,
   onRunAudit,
   isLoading,
-  onLoadSample,
-  serverConfig,
-  apiKey
+  serverConfig
 }) {
   const [docName, setDocName] = useState('');
   const [docText, setDocText] = useState('');
@@ -86,45 +84,15 @@ export default function InputSection({
   return (
     <div className="glass-panel" style={{ padding: '24px', marginBottom: '24px' }}>
       
-      {/* Header bar: Section Title & Quick Benchmark Samples */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
-        <div>
-          <h2 style={{ fontSize: '1.15rem', color: '#ffffff', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Sliders size={20} color="#6366f1" />
-            Audit Setup & Evidence Ingestion
-          </h2>
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-            Provide the AI response and ground-truth documents to verify factual claims
-          </span>
-        </div>
-
-        {/* Quick Sample Benchmark Pills */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)', fontWeight: 600 }}>
-            Sample Benchmarks:
-          </span>
-          <button
-            className="btn-secondary"
-            onClick={() => onLoadSample('medical_case')}
-            style={{ padding: '4px 10px', fontSize: '0.75rem', borderRadius: '14px' }}
-          >
-            Clinical Case
-          </button>
-          <button
-            className="btn-secondary"
-            onClick={() => onLoadSample('financial_case')}
-            style={{ padding: '4px 10px', fontSize: '0.75rem', borderRadius: '14px' }}
-          >
-            Financial Report
-          </button>
-          <button
-            className="btn-secondary"
-            onClick={() => onLoadSample('logical_conflict_case')}
-            style={{ padding: '4px 10px', fontSize: '0.75rem', borderRadius: '14px' }}
-          >
-            Logic Conflict
-          </button>
-        </div>
+      {/* Header bar: Section Title */}
+      <div style={{ marginBottom: '18px' }}>
+        <h2 style={{ fontSize: '1.15rem', color: '#ffffff', margin: '0 0 4px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Sliders size={20} color="#6366f1" />
+          Audit Setup & Evidence Ingestion
+        </h2>
+        <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+          Provide the AI response and ground-truth documents to verify factual claims
+        </span>
       </div>
 
       {/* Main 2-Column Workflow */}
@@ -317,7 +285,8 @@ export default function InputSection({
                 }}
               >
                 <option value="auto">Automatic (Cloud AI if key configured, with Hybrid Verification)</option>
-                <option value="llm">Strict Online Cloud LLM ({serverConfig?.default_model || 'Gemini 3.8 Flash'})</option>
+                <option value="llm">Strict Online Cloud LLM ({serverConfig?.default_model || 'gemini-2.5-flash'})</option>
+                <option value="offline">Offline Deterministic Engine</option>
               </select>
               <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'block', marginTop: '4px' }}>
                 Verifies factual claims against uploaded context using semantic cross-referencing.
@@ -378,13 +347,13 @@ export default function InputSection({
         {/* Verification Engine Readiness */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.82rem' }}>
           <span style={{ color: 'var(--text-dim)' }}>Engine:</span>
-          {(serverConfig?.has_gemini_api_key || apiKey) ? (
+          {serverConfig?.has_gemini_api_key ? (
             <span style={{ color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
-              <Sparkles size={14} /> Ready • {serverConfig?.default_model || 'Gemini 3.8 Flash'} Cloud Verification
+              <Sparkles size={14} /> Ready • {serverConfig?.default_model || 'gemini-2.5-flash'} Cloud Verification
             </span>
           ) : (
-            <span style={{ color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
-              <Sparkles size={14} /> Ready • Evidence Verification Engine
+            <span style={{ color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
+              <Cpu size={14} /> Offline verification (no API key configured on the server)
             </span>
           )}
         </div>

@@ -1,9 +1,11 @@
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from app.schemas.audit import AuditRequest, DocumentInput, VerdictEnum
 from app.core.verifier import AuditEngine
 from app.core.safety import SafetyAnalyzer
 from app.core.extractor import ClaimExtractor
+from app.main import app
 
 def test_four_visible_categories_supported_and_contradicted():
     """Tests SUPPORTED and CONTRADICTED claims against evidence."""
@@ -19,9 +21,7 @@ def test_four_visible_categories_supported_and_contradicted():
     )
     res = AuditEngine.run_audit(request)
     assert res.summary.total_claims == 2
-    # The guideline never says this patient was diagnosed: it must not count as an error either way.
     assert res.claims[0].verdict in (VerdictEnum.SUPPORTED, VerdictEnum.AMBIGUOUS, VerdictEnum.INSUFFICIENT_EVIDENCE)
-    # The dose (50mg once daily vs 500-1000mg three times daily) is a verified mismatch with an exact span.
     dose = res.claims[1]
     assert dose.verdict == VerdictEnum.CONTRADICTED
     assert dose.error_span is not None and dose.error_span.text in ("50mg", "once")
@@ -43,7 +43,6 @@ def test_logical_inconsistency_detection():
     res = AuditEngine.run_audit(request)
     assert res.summary.internal_contradictions_detected >= 1
     assert len(res.logical_inconsistencies) >= 1
-    # At least one claim should be categorized under LOGICAL_INCONSISTENCY
     inconsistent_claims = [c for c in res.claims if c.verdict == VerdictEnum.LOGICAL_INCONSISTENCY]
     assert len(inconsistent_claims) >= 1
 
@@ -147,12 +146,13 @@ def test_explicit_llm_mode_fails_cleanly_when_key_missing(monkeypatch):
     """Tests that selecting LLM mode when no API key exists raises clean HTTPException instead of silent fallback."""
     from app.config import settings
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
 
     request = AuditRequest(
         answer_text="The patient was diagnosed with community-acquired pneumonia.",
         documents=[DocumentInput(filename="test.txt", content="Protocol content.")],
-        options={"verification_mode": "llm", "force_deterministic_fallback": False},
-        api_key=""
+        options={"verification_mode": "llm", "force_deterministic_fallback": False}
     )
     with pytest.raises(HTTPException) as exc_info:
         AuditEngine.run_audit(request)
@@ -176,8 +176,7 @@ def test_api_failure_raises_502_without_silent_fallback(monkeypatch):
     request = AuditRequest(
         answer_text="The patient was diagnosed with community-acquired pneumonia.",
         documents=[DocumentInput(filename="test.txt", content="Protocol content.")],
-        options={"verification_mode": "llm", "force_deterministic_fallback": False},
-        api_key="mock_key"
+        options={"verification_mode": "llm", "force_deterministic_fallback": False}
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -200,8 +199,7 @@ def test_404_model_not_found_raises_404_with_configured_model_guidance(monkeypat
     request = AuditRequest(
         answer_text="The patient was diagnosed with community-acquired pneumonia.",
         documents=[DocumentInput(filename="test.txt", content="Protocol content.")],
-        options={"verification_mode": "llm", "force_deterministic_fallback": False},
-        api_key="mock_key"
+        options={"verification_mode": "llm", "force_deterministic_fallback": False}
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -214,14 +212,11 @@ def test_404_model_not_found_raises_404_with_configured_model_guidance(monkeypat
 def test_model_configuration_from_settings_and_env(monkeypatch):
     """Verifies that the default model is configurable and defaults to gemini-2.5-flash."""
     from app.config import Settings
-    import os
 
-    # Default fallback
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     s1 = Settings()
     assert s1.DEFAULT_MODEL == "gemini-2.5-flash"
 
-    # Environment variable override
     monkeypatch.setenv("GEMINI_MODEL", "custom-model-pro")
     s2 = Settings()
     assert s2.DEFAULT_MODEL == "custom-model-pro"
@@ -232,6 +227,8 @@ def test_model_check_endpoint(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     res = check_model_availability()
     assert res["status"] == "unconfigured"
     assert res["model"] == settings.DEFAULT_MODEL
@@ -273,7 +270,6 @@ def test_evidence_grounding_and_separation():
     claim = res.claims[0]
     assert claim.verdict == VerdictEnum.CONTRADICTED
     assert len(claim.contradicting_evidence) >= 1
-    # Verify that the excerpt actually exists in the source document
     for ev in claim.contradicting_evidence:
         assert ev.excerpt in doc_content
         assert ev.source_name == "protocol.txt"
@@ -297,10 +293,8 @@ def test_scenario_1_offline_auditing_works_without_api_key():
     request = AuditRequest(
         answer_text="Amoxicillin 500mg should be taken three times daily for pneumonia.",
         documents=[DocumentInput(filename="protocol.txt", content="For adult pneumonia, Amoxicillin 500mg three times daily is recommended.")],
-        options={"verification_mode": "auto", "force_deterministic_fallback": False},
-        api_key=None
+        options={"verification_mode": "auto", "force_deterministic_fallback": False}
     )
-    # Ensure no environment key
     orig_key = settings.GEMINI_API_KEY
     settings.GEMINI_API_KEY = ""
     try:
@@ -311,54 +305,32 @@ def test_scenario_1_offline_auditing_works_without_api_key():
     finally:
         settings.GEMINI_API_KEY = orig_key
 
-def test_scenario_2_valid_key_configuration_via_config_and_env():
-    """Scenario 2: A valid API key can be configured via /api/config, GEMINI_API_KEY, or GOOGLE_API_KEY."""
-    import os
-    from app.api.routes import update_config, ConfigUpdateRequest, get_config
-    from app.config import settings, Settings
+def test_scenario_2_valid_key_configuration_via_env(monkeypatch):
+    """Scenario 2: A valid API key can be configured via GEMINI_API_KEY or GOOGLE_API_KEY environment variable."""
+    from app.config import Settings
 
-    orig_env = os.environ.copy()
-    orig_settings_key = settings.GEMINI_API_KEY
-    try:
-        os.environ.pop("GEMINI_API_KEY", None)
-        os.environ.pop("GOOGLE_API_KEY", None)
-        settings.GEMINI_API_KEY = ""
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestConfiguredKey123")
+    s1 = Settings()
+    assert s1.GEMINI_API_KEY == "AIzaSyTestConfiguredKey123"
 
-        # 1. Update config via endpoint
-        resp = update_config(ConfigUpdateRequest(api_key="AIzaSyTestConfiguredKey123"))
-        assert resp["has_gemini_api_key"] is True
-        assert get_config()["has_gemini_api_key"] is True
-        assert settings.GEMINI_API_KEY == "AIzaSyTestConfiguredKey123"
-
-        # 2. Reset and verify GOOGLE_API_KEY fallback
-        settings.GEMINI_API_KEY = ""
-        os.environ.pop("GEMINI_API_KEY", None)
-        os.environ["GOOGLE_API_KEY"] = "AIzaSyGoogleKeyAlias456"
-        s = Settings()
-        assert s.GEMINI_API_KEY == "AIzaSyGoogleKeyAlias456"
-    finally:
-        os.environ.clear()
-        os.environ.update(orig_env)
-        settings.GEMINI_API_KEY = orig_settings_key
-
-
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIzaSyGoogleKeyAlias456")
+    s2 = Settings()
+    assert s2.GEMINI_API_KEY == "AIzaSyGoogleKeyAlias456"
 
 def test_scenario_3_api_based_auditing_returns_expected_response_format(monkeypatch):
     """Scenario 3: API-based auditing completes and returns results in the expected AuditResponse schema."""
     from app.config import settings
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "mock_valid_key")
 
-    # Mock LLM claim extraction
     monkeypatch.setattr(ClaimExtractor, "extract_claims_with_llm", lambda text, **kwargs: [
         {"claim_id": "claim_1", "text": "Amoxicillin dosage is 500mg three times daily.", "start_char": 0, "end_char": 47}
     ])
 
-    # Mock Gemini claim verification
     monkeypatch.setattr(AuditEngine, "_verify_with_gemini", lambda *args, **kwargs: (
         VerdictEnum.SUPPORTED, 0.95, "Verified against reference document guidelines.", [0], [], False
     ))
 
-    # Mock LLM safety analysis
     from app.schemas.audit import SafetyAnalysisResult
     monkeypatch.setattr(SafetyAnalyzer, "analyze_with_llm", lambda *args, **kwargs: (
         SafetyAnalysisResult(flagged_count=0, recommendations=[], summary="Safe.")
@@ -367,8 +339,7 @@ def test_scenario_3_api_based_auditing_returns_expected_response_format(monkeypa
     request = AuditRequest(
         answer_text="Amoxicillin dosage is 500mg three times daily.",
         documents=[DocumentInput(filename="guidelines.txt", content="Amoxicillin dosage is 500mg three times daily for pneumonia.")],
-        options={"verification_mode": "llm"},
-        api_key="mock_valid_key"
+        options={"verification_mode": "llm"}
     )
 
     res = AuditEngine.run_audit(request)
@@ -376,7 +347,6 @@ def test_scenario_3_api_based_auditing_returns_expected_response_format(monkeypa
     assert res.model_info == settings.DEFAULT_MODEL
     assert len(res.claims) == 1
     assert res.claims[0].verdict == VerdictEnum.SUPPORTED
-    # confidence is computed from verification signals, never self-reported by the LLM
     assert 0.0 < res.claims[0].confidence <= 0.97
     assert res.claims[0].confidence_signals
     assert res.summary.supported_count == 1
@@ -396,8 +366,7 @@ def test_scenario_4_invalid_or_rejected_key_produces_clear_401_error(monkeypatch
     request = AuditRequest(
         answer_text="The patient was diagnosed with pneumonia.",
         documents=[DocumentInput(filename="test.txt", content="Pneumonia notes.")],
-        options={"verification_mode": "llm"},
-        api_key="rejected_key"
+        options={"verification_mode": "llm"}
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -412,28 +381,69 @@ def test_scenario_5_api_failures_do_not_break_offline_auditing(monkeypatch):
     from app.config import settings
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "broken_key")
 
-    # Even with a broken API key configured on backend, offline mode succeeds 100%
     request = AuditRequest(
         answer_text="The patient was diagnosed with community-acquired pneumonia.",
         documents=[DocumentInput(filename="test.txt", content="Community-acquired pneumonia was confirmed.")],
-        options={"verification_mode": "offline", "force_deterministic_fallback": True},
-        api_key=None
+        options={"verification_mode": "offline", "force_deterministic_fallback": True}
     )
 
     res = AuditEngine.run_audit(request)
     assert res.verification_mode == "offline_deterministic"
     assert res.summary.total_claims == 1
-    assert res.summary.contradicted_count == 0  # a related but non-conflicting source is never an error
+    assert res.summary.contradicted_count == 0
 
-def test_scenario_6_model_check_endpoint_post_and_get():
-    """Scenario 6: Model check endpoint works with POST body to avoid exposing keys in query strings."""
-    from app.api.routes import check_model_availability, ModelCheckRequest
+def test_scenario_6_model_check_endpoint(monkeypatch):
+    """Scenario 6: Model check endpoint works using server-side configuration."""
+    from app.api.routes import check_model_availability
+    from app.config import settings
 
-    # Unconfigured
-    res1 = check_model_availability(api_key="", body=ModelCheckRequest(api_key=""))
-    assert res1["status"] == "unconfigured"
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    res = check_model_availability()
+    assert "status" in res
+    assert "model" in res
 
-    # POST body with key
-    res2 = check_model_availability(body=ModelCheckRequest(api_key=""))
-    assert res2["status"] == "unconfigured"
+def test_audit_request_ignores_or_rejects_api_key_field():
+    """Requirement test 1: AuditRequest ignores or rejects an api_key field."""
+    raw_data = {
+        "answer_text": "Test answer text.",
+        "documents": [],
+        "api_key": "some_key_attempt_from_browser"
+    }
+    req = AuditRequest(**raw_data)
+    assert not hasattr(req, "api_key")
 
+def test_post_config_endpoint_no_longer_exists():
+    """Requirement test 2: POST /api/config no longer exists (returns 405 or 404)."""
+    client = TestClient(app)
+    response = client.post("/api/config", json={"api_key": "test_key"})
+    assert response.status_code in (404, 405)
+
+def test_get_config_never_contains_key_string(monkeypatch):
+    """Requirement test 3: GET /api/config never contains the API key string."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "AIzaSySUPER_SECRET_KEY_999")
+    client = TestClient(app)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["has_gemini_api_key"] is True
+    assert "AIzaSySUPER_SECRET_KEY_999" not in str(data)
+    assert "api_key" not in data
+
+def test_app_starts_and_audits_in_offline_mode_when_no_key_set(monkeypatch):
+    """Requirement test 4: App starts and audits in offline mode when no key is set."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    request = AuditRequest(
+        answer_text="The eclipse occurred in October 2023.",
+        documents=[DocumentInput(filename="doc.txt", content="The solar eclipse occurred in October 2023.")],
+        options={"verification_mode": "auto"}
+    )
+    res = AuditEngine.run_audit(request)
+    assert res.verification_mode == "offline_deterministic"
+    assert res.summary.total_claims >= 1

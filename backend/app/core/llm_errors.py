@@ -8,15 +8,20 @@ _OFFLINE_HINT = "or switch to Offline Deterministic Mode in Advanced Settings."
 
 
 def classify_llm_error(err: Exception, model_name: str, stage: str) -> Tuple[int, str]:
+    from app.config import settings
     text, lower = str(err), str(err).lower()
+    if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY in text:
+        text = text.replace(settings.GEMINI_API_KEY, "***MASKED***")
+        lower = text.lower()
+
     invalid_key = (any(p in text for p in _KEY_PATTERNS)
                    or ("api key" in lower or "api_key" in lower) and any(
                        w in lower for w in ("invalid", "rejected", "not valid", "unauthorized", "expired", "missing"))
                    or "PERMISSION_DENIED" in text or "UNAUTHENTICATED" in text)
     if invalid_key:
         return (status.HTTP_401_UNAUTHORIZED,
-                "The provided Gemini API key is invalid or has been rejected by Google AI (API_KEY_INVALID). "
-                "Please verify your API key in Configure Key or set a valid GEMINI_API_KEY in your environment, "
+                "The configured Gemini API key is invalid or has been rejected by Google AI (API_KEY_INVALID). "
+                "Please verify the GEMINI_API_KEY set in backend/.env or server environment, "
                 + _OFFLINE_HINT)
     if "404" in text or "NOT_FOUND" in text or "not found" in lower:
         return (status.HTTP_404_NOT_FOUND,
@@ -26,7 +31,7 @@ def classify_llm_error(err: Exception, model_name: str, stage: str) -> Tuple[int
     if "429" in text or "RESOURCE_EXHAUSTED" in text or "ResourceExhausted" in text or "quota" in lower:
         return (status.HTTP_502_BAD_GATEWAY,
                 f"Gemini API {stage} failed with model '{model_name}': Google GenAI RateLimit (429 ResourceExhausted). "
-                "You can retry the audit, check your API key/network, " + _OFFLINE_HINT)
+                "You can retry the audit, check your network/API key in backend/.env, " + _OFFLINE_HINT)
     return (status.HTTP_502_BAD_GATEWAY,
             f"Gemini API {stage} failed with model '{model_name}': {text}. "
-            "You can retry the audit, check your API key/network, " + _OFFLINE_HINT)
+            "You can retry the audit, check your network/API key in backend/.env, " + _OFFLINE_HINT)

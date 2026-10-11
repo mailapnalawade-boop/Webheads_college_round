@@ -15,11 +15,6 @@ export const runAudit = async (payload) => {
   return response.data;
 };
 
-export const getSampleData = async () => {
-  const response = await apiClient.get('/sample');
-  return response.data;
-};
-
 export const getHealth = async () => {
   const response = await apiClient.get('/health');
   return response.data;
@@ -30,13 +25,7 @@ export const getConfig = async () => {
   return response.data;
 };
 
-export const updateConfig = async (config) => {
-  const response = await apiClient.post('/config', config);
+export const checkModelAvailability = async () => {
+  const response = await apiClient.post('/model-check');
   return response.data;
 };
-
-export const checkModelAvailability = async (apiKey) => {
-  const response = await apiClient.post('/model-check', { api_key: apiKey });
-  return response.data;
-};
-

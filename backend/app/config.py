@@ -3,8 +3,9 @@ from pydantic import BaseModel, Field
 
 def _load_env_file():
     """Simple parser for .env file if present without requiring external libraries."""
+    backend_env = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
     candidate_paths = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"),
+        backend_env,
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env"),
         os.path.join(os.getcwd(), ".env"),
         os.path.join(os.getcwd(), "..", ".env"),
@@ -31,6 +32,12 @@ def _load_env_file():
         alias = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_GENAI_API_KEY") or os.environ.get("API_KEY")
         if alias:
             os.environ["GEMINI_API_KEY"] = alias
+
+    if not os.environ.get("GEMINI_API_KEY"):
+        import logging
+        logger = logging.getLogger("second_opinion")
+        logger.info("No GEMINI_API_KEY found in backend/.env - running in offline mode")
+        print("No GEMINI_API_KEY found in backend/.env - running in offline mode")
 
 _load_env_file()
 

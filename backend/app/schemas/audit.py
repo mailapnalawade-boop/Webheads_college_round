@@ -115,7 +115,6 @@ class AuditRequest(BaseModel):
     answer_text: str
     documents: List[DocumentInput] = []
     options: AuditOptions = Field(default_factory=AuditOptions)
-    api_key: Optional[str] = None  # Optional user-provided override, backend env preferred
 
 class AuditResponse(BaseModel):
     audit_id: str

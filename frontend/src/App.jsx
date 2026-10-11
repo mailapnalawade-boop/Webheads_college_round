@@ -9,10 +9,9 @@ import LogicalInconsistenciesSection from './components/LogicalInconsistenciesSe
 import SafetyRecommendationsSection from './components/SafetyRecommendationsSection';
 import AuditLoadingOverlay from './components/AuditLoadingOverlay';
 import { exportAuditPdf } from './utils/pdfGenerator';
-import { runAudit, getSampleData, getConfig } from './services/api';
+import { runAudit, getConfig } from './services/api';
 
 export default function App() {
-  const [apiKey, setApiKey] = useState('');
   const [answerText, setAnswerText] = useState('');
   const [documents, setDocuments] = useState([]);
   const [options, setOptions] = useState({
@@ -37,22 +36,6 @@ export default function App() {
       .catch(() => setServerConfig({ has_gemini_api_key: false, active_mode: 'offline_deterministic' }));
   }, []);
 
-  // Load sample dataset
-  const handleLoadSample = async (sampleKey = 'medical_case') => {
-    try {
-      const samples = await getSampleData();
-      const chosen = samples[sampleKey] || samples.medical_case;
-      if (chosen) {
-        setAnswerText(chosen.answer_text);
-        setDocuments(chosen.documents);
-        setErrorMsg('');
-      }
-    } catch (err) {
-      console.error(err);
-      setErrorMsg('Failed to fetch benchmark sample dataset from server.');
-    }
-  };
-
   // Run audit request
   const handleRunAudit = async () => {
     if (!answerText.trim()) return;
@@ -64,8 +47,7 @@ export default function App() {
       const payload = {
         answer_text: answerText,
         documents: documents,
-        options: options,
-        api_key: apiKey || null
+        options: options
       };
 
       const result = await runAudit(payload);
@@ -102,8 +84,7 @@ export default function App() {
       const payload = {
         answer_text: answerText,
         documents: documents,
-        options: offlineOpts,
-        api_key: null
+        options: offlineOpts
       };
       const result = await runAudit(payload);
       setAuditResult(result);
@@ -272,12 +253,7 @@ export default function App() {
     <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '24px 16px' }}>
       
       {/* Header */}
-      <Header
-        serverConfig={serverConfig}
-        apiKey={apiKey}
-        setApiKey={setApiKey}
-        onConfigUpdated={(cfg) => setServerConfig(cfg)}
-      />
+      <Header serverConfig={serverConfig} />
 
       {/* Input Section */}
       <InputSection
@@ -289,9 +265,7 @@ export default function App() {
         setOptions={setOptions}
         onRunAudit={handleRunAudit}
         isLoading={isLoading}
-        onLoadSample={handleLoadSample}
         serverConfig={serverConfig}
-        apiKey={apiKey}
       />
 
       {/* Loading & Error Dedicated Overlay */}
@@ -344,7 +318,6 @@ export default function App() {
               safetyAnalysis={auditResult.safety_analysis}
             />
           )}
-
 
           {/* 2. Prioritized Issues That Need Attention (Contradicted & Unverified first) */}
           {(activeFilter === 'ALL' || activeFilter === 'ISSUES' || activeFilter === 'CONTRADICTED' || activeFilter === 'INSUFFICIENT_EVIDENCE' || activeFilter === 'AMBIGUOUS') && (

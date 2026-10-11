@@ -97,13 +97,13 @@ class AuditEngine:
     def _resolve_mode(request: AuditRequest) -> RunMode:
         opts = request.options
         force_offline = opts.force_deterministic_fallback or opts.verification_mode == "offline"
-        api_key = (request.api_key or settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
+        api_key = (settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
                    or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
         explicit = opts.verification_mode == "llm"
         if explicit and not api_key:
             raise HTTPException(status_code=400, detail=(
-                "GEMINI_API_KEY is not configured on the backend environment. Please set GEMINI_API_KEY in the "
-                "server environment or switch to Offline Deterministic Mode in Advanced Settings."))
+                "GEMINI_API_KEY is not configured on the backend environment. Please set GEMINI_API_KEY in backend/.env "
+                "or switch to Offline Deterministic Mode in Advanced Settings."))
         use_llm = not force_offline and bool(api_key)
         return RunMode(use_llm, explicit, api_key, settings.DEFAULT_MODEL if use_llm else AuditEngine._offline_model_name())
 

@@ -34,6 +34,9 @@ python -m venv venv
 .\venv\Scripts\activate
 pip install -r requirements.txt
 
+# To configure online Gemini LLM mode:
+# copy backend/.env.example to backend/.env and paste your key; restart the backend
+
 # Run backend API server on http://localhost:8000
 python run.py
 ```
@@ -67,8 +70,9 @@ cd backend
 ```
 Second Opinion/
 ├── backend/
+│   ├── .env.example               # Environment template for Gemini API key & model settings
 │   ├── app/
-│   │   ├── api/routes.py          # REST Endpoints (/api/audit, /api/sample, /api/health)
+│   │   ├── api/routes.py          # REST Endpoints (/api/audit, /api/config, /api/health)
 │   │   ├── core/
 │   │   │   ├── extractor.py       # Atomic claim sentence extractor
 │   │   │   ├── parser.py          # PyMuPDF & text document chunker

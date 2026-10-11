@@ -1,5 +1,6 @@
 import os
 import sys
+import uvicorn
 
 # Auto-inject virtualenv site-packages if available
 backend_dir = os.path.dirname(os.path.abspath(__file__))
